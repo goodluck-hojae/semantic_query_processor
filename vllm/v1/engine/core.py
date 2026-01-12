@@ -307,6 +307,12 @@ class EngineCore:
         # (i.e. client-aborted vs stop criteria met).
         self.scheduler.finish_requests(request_ids, RequestStatus.FINISHED_ABORTED)
 
+    def pin_kv(self, request_id: str) -> None:
+        self.scheduler.kv_cache_manager.pin_cached_blocks_for_request(request_id+'-0')
+
+    def unpin_kv(self, request_id) -> None:
+        self.scheduler.kv_cache_manager.unpin_cached_blocks_for_request(request_id+'-0')
+
     @contextmanager
     def log_error_detail(self, scheduler_output: SchedulerOutput):
         """Execute the model and log detailed info on failure."""

@@ -44,7 +44,10 @@ class Request:
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
         block_hasher: Callable[["Request"], list["BlockHash"]] | None = None,
+        pin_kv: bool = False,  # Hojae
     ) -> None:
+        
+        # self.pin_kv = pin_kv  # Hojae
         self.request_id = request_id
         self.client_index = client_index
         self.priority = priority
@@ -143,7 +146,8 @@ class Request:
         request: EngineCoreRequest,
         block_hasher: Callable[["Request"], list["BlockHash"]] | None,
     ) -> "Request":
-        return cls(
+        
+        req = cls(
             request_id=request.request_id,
             client_index=request.client_index,
             prompt_token_ids=request.prompt_token_ids,
@@ -159,6 +163,15 @@ class Request:
             trace_headers=request.trace_headers,
             block_hasher=block_hasher,
         )
+                
+        req.pin_kv = bool(
+            request.sampling_params.extra_args.get("pin_kv", False)
+            if request.sampling_params and request.sampling_params.extra_args
+            else False
+        )
+        
+        return req
+
 
     def append_output_token_ids(
         self,

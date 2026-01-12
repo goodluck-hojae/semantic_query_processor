@@ -310,7 +310,8 @@ class BlockPool:
         # In order to only iterate the list once, we duplicated code a bit
         if self.enable_caching:
             for block in ret:
-                self._maybe_evict_cached_block(block)
+                if not block.pinned: # Hojae
+                    self._maybe_evict_cached_block(block)
                 assert block.ref_cnt == 0
                 block.ref_cnt += 1
                 if self.metrics_collector:
@@ -393,9 +394,30 @@ class BlockPool:
         blocks_list = list(ordered_blocks)
         for block in blocks_list:
             block.ref_cnt -= 1
+
+        # Hojae
+        # self.free_block_queue.append_n(
+        #     [block for block in blocks_list if block.ref_cnt == 0 and not block.is_null]
+        # )
         self.free_block_queue.append_n(
-            [block for block in blocks_list if block.ref_cnt == 0 and not block.is_null]
+            [
+                block for block in blocks_list
+                if block.ref_cnt == 0
+                and not block.is_null
+                and not block.pinned   # REQUIRED
+            ]
         )
+        # self.free_block_queue.append_n(
+        #     [
+        #         block
+        #         for block in blocks_list
+        #         if block.ref_cnt == 0
+        #         and not block.is_null
+        #         and not block.pinned
+        #     ]
+        # )
+
+
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """evict blocks from the prefix cache by their block IDs.

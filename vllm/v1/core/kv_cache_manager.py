@@ -14,7 +14,7 @@ from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
-
+from vllm.v1.core.kv_trace import kv_trace
 logger = init_logger(__name__)
 
 
@@ -173,6 +173,14 @@ class KVCacheManager:
                 - A list of blocks that are computed for the request.
                 - The number of computed tokens.
         """
+        
+        # kv_trace(
+        #     "PREFIX_LOOKUP",
+        #     request_id=request.request_id,
+        #     hit_blocks=self.create_kv_cache_blocks(computed_blocks)
+        #                 .get_block_ids(allow_none=True),
+        #     hit_tokens=num_new_computed_tokens,
+        # )
         # We skip finding the prefix cache hit when prefix caching is
         # disabled or the request is marked as skipping kv cache read
         # (which happens when the request requires prompt logprobs
@@ -303,10 +311,20 @@ class KVCacheManager:
                 request.request_id, new_computed_block_list
             )
 
+        # kv_trace(
+        #     "ALLOC_ATTEMPT",
+        #     request_id=request.request_id,
+        #     need_blocks=num_blocks_to_allocate,
+        # )
         new_blocks = self.coordinator.allocate_new_blocks(
             request.request_id, num_tokens_need_slot, num_encoder_tokens
         )
 
+        # kv_trace(
+        #     "ALLOC_SUCCESS",
+        #     request_id=request.request_id,
+        #     new_blocks=self.create_kv_cache_blocks(new_blocks).get_block_ids(),
+        # )
         # P/D: delay caching blocks if we have to recv from
         # remote. Update state for locally cached blocks.
         if not self.enable_caching or delay_cache_blocks:
@@ -321,7 +339,51 @@ class KVCacheManager:
         )
         self.coordinator.cache_blocks(request, num_tokens_to_cache)
 
+        if request.pin_kv:
+            self.pin_cached_blocks_for_request(request.request_id)
+        # self.pin_cached_blocks_for_request(request.request_id) # Hojae
+
         return self.create_kv_cache_blocks(new_blocks)
+
+
+    def pin_cached_blocks_for_request(self, request_id):
+        blocks = self.coordinator.get_blocks(request_id)
+
+        for group in blocks:
+            for blk in group:
+                if blk.is_null or blk.block_hash is None:
+                    continue
+                blk.pinned = True
+
+
+    def unpin_cached_blocks_for_request(self, request_id):
+        blocks = self.coordinator.get_blocks(request_id)
+
+        for group in blocks:
+            for blk in group:
+                blk.pinned = False
+        self.coordinator.free(request_id)
+        
+
+    # def unpin_cached_blocks_for_request(self, request_id: str):
+    #     to_free = []
+    #     blocks = self.coordinator.get_blocks(request_id)
+
+    #     for group in blocks:
+    #         for blk in group:
+    #             if blk.is_null or blk.block_hash is None:
+    #                 continue
+
+    #             blk.pinned = False
+
+    #             # If free already happened while pinned, recover it
+    #             if blk.ref_cnt == 0:
+    #                 to_free.append(blk)
+
+    #     if to_free:
+    #         self.block_pool.free_block_queue.append_n(to_free)
+
+
 
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.
@@ -331,6 +393,11 @@ class KVCacheManager:
         Args:
             request: The request to free the blocks.
         """
+        # kv_trace(
+        #     "FREE",
+        #     request_id=request.request_id,
+        #     blocks=self.get_block_ids(request.request_id),
+        # )
         self.coordinator.free(request.request_id)
 
     def evict_blocks(self, block_ids: set[int]) -> None:
