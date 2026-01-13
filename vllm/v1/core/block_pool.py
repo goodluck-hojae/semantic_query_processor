@@ -376,7 +376,7 @@ class BlockPool:
             for block in blocks_per_group:
                 # ref_cnt=0 means this block is in the free list (i.e. eviction
                 # candidate), so remove it.
-                if block.ref_cnt == 0 and not block.is_null:
+                if block.ref_cnt == 0 and not block.is_null and not block.pinned:  # Hojae
                     self.free_block_queue.remove(block)
                 block.ref_cnt += 1
                 if self.metrics_collector:
