@@ -92,7 +92,7 @@ class QueryProcessor:
             for _ in range(concurrency)
         ]
 
-        for ctx in ctx_iter:
+        for idx, ctx in enumerate(ctx_iter):
             chain = self._build_chain(ctx)
 
             # WAIT until capacity available
@@ -103,6 +103,8 @@ class QueryProcessor:
                 self.kv_estimator.allocate(chain.budget)
 
             await queue.put((chain))
+
+            print(idx)
 
         # wait until all tasks processed
         await queue.join()

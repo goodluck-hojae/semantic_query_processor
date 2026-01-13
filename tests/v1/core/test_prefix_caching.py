@@ -405,6 +405,8 @@ def test_prefill_hybrid_model():
         0,
     )
 
+init_none_hash(sha256)
+test_prefill(sha256)
 
 def test_prefill_plp():
     """Test prefill with APC and some prompt logprobs (plp) requests.

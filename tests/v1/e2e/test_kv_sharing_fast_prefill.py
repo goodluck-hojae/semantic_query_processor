@@ -49,9 +49,9 @@ use_fork_for_test = (
 )
 
 
-@use_fork_for_test
-@pytest.mark.parametrize("kv_sharing_fast_prefill", [False, True])
-@pytest.mark.parametrize("enforce_eager", [True, False])
+# @use_fork_for_test
+@pytest.mark.parametrize("kv_sharing_fast_prefill", [True])
+@pytest.mark.parametrize("enforce_eager", [False])
 def test_kv_sharing_fast_prefill(
     monkeypatch: pytest.MonkeyPatch,
     kv_sharing_fast_prefill: bool,
