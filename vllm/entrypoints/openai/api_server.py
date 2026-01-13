@@ -233,7 +233,6 @@ async def build_async_engine_client_from_engine_args(
 
 router = APIRouter()
 
-
 def base(request: Request) -> OpenAIServing:
     # Reuse the existing instance
     return tokenization(request)
@@ -567,6 +566,18 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
 
 
 
+
+
+@router.post("/v1/semantic/dummy")
+async def dummy(raw_request: Request):
+    # Access engine
+    budget = await raw_request.app.state.engine_client.engine_core.call_utility_async('get_kv_cache_budget')
+
+    return {
+        "budget": budget
+    }
+
+
 from vllm.semantic_query_processor import query_processor, query, interface
 @router.post("/v1/semantic/query")
 async def semantic_query(
@@ -578,9 +589,10 @@ async def semantic_query(
     print(sem_request.query)
     print("data_path:") 
     print("================================")
-    processor = query_processor.QueryProcessor()
     _query = query.Query(sem_request.query, sem_request.data_path)
     print('query called')
+    
+    processor = raw_request.app.state.query_processor
     await processor.execute(raw_request, _query)
     
     return {
@@ -1402,6 +1414,20 @@ async def init_app_state(
     state.enable_server_load_tracking = args.enable_server_load_tracking
     state.server_load_metrics = 0
 
+    # when init, query processor initiated
+    logger.info(
+        "Starting Semantic Query processor"
+    )
+    model_name = state.engine_client.vllm_config.model_config.model
+    budget = await state.engine_client.engine_core.call_utility_async(
+        "get_kv_cache_budget"
+    )
+
+    # Query processor currently doesn't reflect other requests' budget usage
+    state.query_processor = query_processor.QueryProcessor(model_name=model_name, budget=budget)
+    
+
+
 
 def create_server_socket(addr: tuple[str, int]) -> socket.socket:
     family = socket.AF_INET
@@ -1515,9 +1541,9 @@ async def run_server_worker(
         client_config=client_config,
     ) as engine_client:
         app = build_app(args)
-
+        
         await init_app_state(engine_client, app.state, args)
-
+ 
         logger.info(
             "Starting vLLM API server %d on %s",
             engine_client.vllm_config.parallel_config._api_process_rank,

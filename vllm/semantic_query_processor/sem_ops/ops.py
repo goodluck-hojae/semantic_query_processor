@@ -1,4 +1,6 @@
 import json
+
+from click import prompt
 from vllm import SamplingParams
 
 # TODO: Remove the dependency 
@@ -16,6 +18,7 @@ from typing import Any, Dict
 class SemContext:
     raw_request: Any
     data: Any
+    token_length: Any
     question: Any
     prefix_req_id: Any
     prefix: Any
@@ -57,31 +60,99 @@ OPERATOR_LIST = ['sem_filter', 'sem_join', 'sem_groupby', 'sem_topk', 'sem_map',
 UNCETAIN_OPERATOR = ['sem_filter', 'sem_join']
 
 
-def sem_chain(*ops):
-    async def run(x):
-        value = x
-        for op in ops:
+
+class SemanticChain:
+    def __init__(self, ctx, *ops, bytes_per_token: int):
+        self.ctx = ctx
+        self.ops = ops
+        self.bytes_per_token = bytes_per_token
+        self.budget = self.estimate_token_budget(ctx.token_length)
+        
+
+    # budget function should be updated based on operations
+    def estimate_token_budget(self, prompt_token_len) -> int:
+        total_tokens = 0
+
+        for op in self.ops:
+            if not hasattr(op, "max_len"):
+                raise AttributeError(
+                    f"{op} must define `max_len`"
+                )
+            total_tokens += op.max_len
+
+        self.budget = (prompt_token_len + total_tokens) * self.bytes_per_token
+        return self.budget
+
+
+    async def __call__(self):
+        value = self.ctx
+
+        for op in self.ops:
             reuse = await op(value)
-            if type(reuse) == tuple:
+
+            if isinstance(reuse, tuple):
                 value.prefix_req_id = reuse[1]
-            if reuse:
-                continue
-            else:
+                reuse = reuse[0]
+
+            if not reuse:
                 break
-    return run
+
+        return value
 
 
-async def sem_filter(ctx: SemContext):
-    prompt = ctx.data + '\n\n' + ctx.question['sem_filter'] + '\n\n' + 'Answer yes or no. Answer:'
-    res, req = await completion_call_internal(ctx.raw_request, prompt, 10, pin=ctx.prefix)
-    res['choices'][0]['text']
-    return (True, res['id'])
+
+class BaseOp:
+    max_len: int
+
+    async def __call__(self, ctx):
+        raise NotImplementedError
+
+
+class SemFilter(BaseOp):
+    max_len = 10
+
+    async def __call__(self, ctx):
+        prompt = (
+            ctx.data
+            + "\n\n"
+            + ctx.question["sem_filter"]
+            + "\n\n"
+            + "Answer yes or no. Answer:"
+        )
+
+        res, req = await completion_call_internal(
+            ctx.raw_request,
+            prompt,
+            self.max_len,
+            pin=ctx.prefix
+        )
+
+        return (True, res["id"])
+
     
+class SemMap(BaseOp):
+    max_len = 128
 
-async def sem_map(ctx: SemContext):
-    prompt = ctx.data + '\n\n' + ctx.question['sem_map'] + '\n\n'
-    res, req = await completion_call_internal(ctx.raw_request, prompt, 128, pin=False)
-    if ctx.prefix:
-        await ctx.raw_request.app.state.engine_client.engine_core.call_utility_async('unpin_kv', ctx.prefix_req_id)
-    return res['choices'][0]['text']
+    async def __call__(self, ctx):
+        prompt = (
+            ctx.data
+            + "\n\n"
+            + ctx.question["sem_map"]
+            + "\n\n"
+        )
 
+        res, req = await completion_call_internal(
+            ctx.raw_request,
+            prompt,
+            self.max_len,
+            pin=False
+        )
+
+        if ctx.prefix:
+            engine = ctx.raw_request.app.state.engine_client
+            await engine.engine_core.call_utility_async(
+                "unpin_kv",
+                ctx.prefix_req_id
+            )
+
+        return res["choices"][0]["text"]

@@ -313,6 +313,9 @@ class EngineCore:
     def unpin_kv(self, request_id) -> None:
         self.scheduler.kv_cache_manager.unpin_cached_blocks_for_request(request_id+'-0')
 
+    def get_kv_cache_budget(self):
+        return self.available_gpu_memory_for_kv_cache
+    
     @contextmanager
     def log_error_detail(self, scheduler_output: SchedulerOutput):
         """Execute the model and log detailed info on failure."""

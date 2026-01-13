@@ -1,3 +1,4 @@
+from itertools import chain
 from pathlib import Path
 import csv
 from typing import Any
@@ -12,17 +13,11 @@ import asyncio
 
 
 class QueryProcessor:
-    def __init__(self):
-        
-        self.kv_estimator = KVEstimator(
-            kv_config=KVConfig(
-                    bytes_per_token=16,
-                    max_classifiy_tokens=10,
-                    max_gen_tokens=8192*2),
-            max_kv_bytes=2 * 1024 * 1024 # * 1024,  # 8 GB
-        )
+    def __init__(self, model_name, budget):
+        self.model_name = model_name
+        self.kv_estimator = KVEstimator(model_name, budget)
 
-
+    # When engine is initialized, it acquires a sample request to access engine core
     def parse(self, query: Query):
         operations = [] # An operation consists of (data, operator) pairs 
         return operations
@@ -50,6 +45,7 @@ class QueryProcessor:
                 yield ops.SemContext(
                     raw_request=raw_request,
                     data=str(row['Resume_str']).strip(),
+                    token_length=self.kv_estimator.token_length(str(row['Resume_str']).strip()),
                     question={
                         "sem_filter": "Is the candidate capable of GPU programming?",
                         "sem_map": "Summarize the following resume.",
@@ -59,24 +55,35 @@ class QueryProcessor:
             )
 
 
-    def _build_chain(self, query: Query):
-        # operators = self.parse(query)
-        return ops.sem_chain(
-            ops.sem_filter,
-            ops.sem_map,
+    def _build_chain(self, ctx) -> ops.SemanticChain:
+        return ops.SemanticChain(
+            ctx,
+            ops.SemFilter(),
+            ops.SemMap(),
+            bytes_per_token=self.kv_estimator.bytes_per_token,
         )
     
 
-    async def _run_workers(self, chain, ctx_iter, concurrency=40):
+    async def execute(self, raw_request, query: Query):
+        ctx_iter = self._data_source(raw_request, query)
+
+        await self._run_workers(ctx_iter)
+
+
+    async def _run_workers(self, ctx_iter, concurrency=100):
 
         queue = asyncio.Queue(maxsize=concurrency)
+        capacity_cond = asyncio.Condition()
 
         async def worker():
             while True:
-                ctx = await queue.get()
+                chain = await queue.get()
                 try:
-                    await chain(ctx)
+                    await chain()
                 finally:
+                    async with capacity_cond:
+                        self.kv_estimator.release(chain.budget)
+                        capacity_cond.notify_all()
                     queue.task_done()
 
         # start workers
@@ -85,9 +92,17 @@ class QueryProcessor:
             for _ in range(concurrency)
         ]
 
-        # PRODUCE (SYNC ITERATION)
-        for ctx in ctx_iter:          # <-- normal for-loop
-            await queue.put(ctx)
+        for ctx in ctx_iter:
+            chain = self._build_chain(ctx)
+
+            # WAIT until capacity available
+            async with capacity_cond:
+                while not self.kv_estimator.can_admit(chain.budget):
+                    await capacity_cond.wait()
+
+                self.kv_estimator.allocate(chain.budget)
+
+            await queue.put((chain))
 
         # wait until all tasks processed
         await queue.join()
@@ -97,70 +112,25 @@ class QueryProcessor:
             w.cancel()
 
 
-    async def execute(self, raw_request, query: Query):
-        chain = self._build_chain(query)
-        ctx_iter = self._data_source(raw_request, query)
-
-        await self._run_workers(chain, ctx_iter)
-
-
-        # path = Path(query.data_path)
-        # if not path.exists():
-        #     raise FileNotFoundError(path)
-
-        # print(f"[QueryProcessor] Query: {query.query}")
-        # print(f"[QueryProcessor] Scanning: {query.data_path}")
-
-        # MAX_CONCURRENCY = 40
-        # queue = asyncio.Queue(maxsize=MAX_CONCURRENCY)
-        # chain = ops.sem_chain(ops.sem_filter, ops.sem_map)
-
-        
-        # async def worker(worker_id: int):
-        #     while True:
-        #         ctx = await queue.get()
-        #         try:
-        #             await chain(ctx)
-        #         finally:
-        #             queue.task_done()
-
-        # # start workers
-        # workers = [
-        #     asyncio.create_task(worker(i))
-        #     for i in range(MAX_CONCURRENCY)
-        # ]
 
 
 
-        # if path.suffix.lower() == ".csv":
-        #     with path.open("r", encoding="utf-8", newline="") as f:
-        #         reader = csv.DictReader(f)
-        #         batch = []
 
-        #         #TODO: window approach
-        #         rows = list(reader)
-        #         chain = ops.sem_chain(ops.sem_filter, ops.sem_map)
-        #         for row in rows:
-        #             data = str(row['Resume_str']).strip()
 
-        #             ctx = ops.SemContext(
-        #                 raw_request=raw_request,
-        #                 data=data,
-        #                 question={
-        #                     "sem_filter": "Is the candidate capable of GPU programming?",
-        #                     "sem_map": "Sumamrize the following resume.",
-        #                 },
-        #                 prefix_req_id=None,
-        #                 prefix=True
-        #             )
 
-        #             await queue.put(ctx)
 
-        # await queue.join()
 
-        # # shutdown workers
-        # for w in workers:
-        #     w.cancel()
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -188,6 +158,7 @@ class QueryProcessor:
                     ctx = ops.SemContext(
                         raw_request=raw_request,
                         data=data,
+                        token_length=self.kv_estimator.token_length(str(row['Resume_str']).strip()),
                         question={
                             "sem_filter": "Is the candidate capable of GPU programming?",
                             "sem_map": "Sumamrize the following resume.",
@@ -212,6 +183,7 @@ class QueryProcessor:
                     ctx = ops.SemContext(
                         raw_request=raw_request,
                         data=data,
+                        token_length=self.kv_estimator.token_length(str(row['Resume_str']).strip()),
                         question={
                             "sem_filter": "Is the candidate capable of GPU programming?",
                             "sem_map": "Sumamrize the following resume.",

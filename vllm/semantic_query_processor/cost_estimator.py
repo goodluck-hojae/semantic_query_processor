@@ -1,113 +1,122 @@
+# Single-block implementation with dynamic bytes_per_token computation + test
+
+import csv
+from pathlib import Path
+import torch
+from transformers import AutoConfig, AutoTokenizer
 from dataclasses import dataclass
 
 
 @dataclass
 class KVConfig:
     bytes_per_token: int
-    max_classifiy_tokens: int = 10    # boolean answer
+    max_classifiy_tokens: int = 10
     max_gen_tokens: int = 2048
 
 
+def compute_bytes_per_token(
+    model_name: str,
+    dtype: torch.dtype = torch.float16,
+) -> int:
+    cfg = AutoConfig.from_pretrained(model_name)
+
+    num_layers = cfg.num_hidden_layers
+
+    # GQA / MQA aware
+    num_kv_heads = getattr(
+        cfg,
+        "num_key_value_heads",
+        cfg.num_attention_heads,
+    )
+
+    head_dim = cfg.hidden_size // cfg.num_attention_heads
+
+    dtype_bytes = {
+        torch.float16: 2,
+        torch.bfloat16: 2,
+        torch.float32: 4,
+    }[dtype]
+
+    return (
+        2 *                 
+        num_layers *
+        num_kv_heads *
+        head_dim *
+        dtype_bytes
+    )
+
+
 class KVEstimator:
-    """
-    Runtime KV usage estimator.
-    Tracks cumulative KV usage for active tuples.
-    """
+    def __init__(self, model_name: str, kv_capacity: int, dtype=torch.float16):
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.bytes_per_token = compute_bytes_per_token(model_name, dtype)
+        self.kv_capacity = kv_capacity
+    
+    def token_length(self, text: str) -> int:
+        return len(self.tokenizer.encode(text, add_special_tokens=False))
 
-    def __init__(self, kv_config: KVConfig, max_kv_bytes: int):
-        self.cfg = kv_config
-        self.max_kv_bytes = max_kv_bytes
-        self.current_kv_bytes = 0
+    def can_admit(self, budget: int) -> bool:
+        return budget <= self.kv_capacity
 
-    # ----------------------------
-    # Per-tuple estimation
-    # ----------------------------
-
-    def estimate_filter_cost(self, input_tokens: int) -> int:
-        """
-        KV cost after sem_filter.
-        """
-        return (
-            (input_tokens + self.cfg.max_classifiy_tokens) * self.cfg.bytes_per_token
-        )
-
-    def estimate_map_cost(self) -> int:
-        """
-        Additional KV cost introduced by sem_map.
-        """
-        return self.cfg.max_gen_tokens * self.cfg.bytes_per_token
-
-    def estimate_total_tuple_cost(self, input_tokens: int) -> int:
-        """
-        Total KV footprint if tuple reaches sem_map.
-        """
-        return (
-            self.estimate_filter_cost(input_tokens)
-            + self.estimate_map_cost()
-        )
-
-    # ----------------------------
-    # Admission control
-    # ----------------------------
-    def can_admit(self, input_tokens: int) -> bool:
-        """
-        Check whether a new tuple can fit in KV cache.
-        """
-        print('can_admit called')
-        est = self.estimate_total_tuple_cost(input_tokens)
-        return self.current_kv_bytes + est <= self.max_kv_bytes
-
-
-    def admit(self, input_tokens: int):
-        """
-        Admit tuple and charge its KV usage.
-        """
-        print('admit called')
-        est = self.estimate_total_tuple_cost(input_tokens)
-        self.current_kv_bytes += est
-
-    # ----------------------------
-    # Eviction / boundary
-
-    # ----------------------------
-    def reset(self):
-        """
-        Called at semantic boundary.
-        """
-        self.current_kv_bytes = 0
+    def allocate(self, budget: int):
+        # print(f"allocate remaining={self.kv_capacity/1024**3:6.2f}GB")
+        if not self.can_admit(budget):
+            return False
+        self.kv_capacity -= budget
+        return True
+        
+    # When completed
+    def release(self, budget: int):
+        # print(f"release remaining={self.kv_capacity/1024**3:6.2f}GB")
+        self.kv_capacity += budget
+        return True
 
 
 if __name__ == "__main__":
-    cfg = KVConfig(
-        bytes_per_token=16,
-        filter_gen_tokens=2,
-        map_max_gen_tokens=2048,
+    MODEL = "meta-llama/Llama-3.2-3B-Instruct"
+
+    KV_CAPACITY_BYTES = 7117927424
+
+    kv = KVEstimator(MODEL, KV_CAPACITY_BYTES)
+
+    print("Bytes per token:", kv.bytes_per_token)
+    print("Initial KV capacity (GB):", kv.kv_capacity / 1024**3)
+
+    path = Path(
+        "/home/hojaeson_umass_edu/.cache/kagglehub/datasets/"
+        "snehaanbhawal/resume-dataset/versions/1/Resume/Resume.csv"
     )
 
-    kv_estimator = KVEstimator(
-        kv_config=cfg,
-        max_kv_bytes=8 * 1024 * 1024 * 1024,  # 8 GB
-    )
+    admitted = 0
+    rejected = 0
 
-    n_tokens_list = [1000, 5000, 20000, 100000, 500000, 1000000, 1000, 5000, 20000, 100000, 500000, 1000000, 1000, 5000, 20000, 100000, 500000, 1000000, 1000, 5000, 20000, 100000, 500000, 1000000]  * 300
+    with path.open("r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
 
-    for idx, n_tokens in enumerate(n_tokens_list):
-        if kv_estimator.can_admit(n_tokens):
-            kv_estimator.admit(n_tokens)
-        else:
-            break
-        print(idx, kv_estimator.current_kv_bytes, kv_estimator.max_kv_bytes)
-        
-    op1 = sem_filter
-    op2 = sem_map
-    for idx, input in enumerate(n_tokens_list):
-        is_true = op1(input)
-        if is_true:
-            if kv_estimator.can_admit(input):
-                kv_estimator.admit(input)
-                current_batch.append(input)
+        for i, row in enumerate(reader):
+            resume = row["Resume_str"].strip()
+
+            tokens = kv.count_tokens(resume)
+            kv_bytes = tokens * kv.bytes_per_token
+
+            ok = kv.add_request(resume)
+
+            if ok:
+                admitted += 1
             else:
-                op2(current_batch)
-            
+                rejected += 1
 
+            print(
+                f"[{i:03d}] tokens={tokens:<5} "
+                f"req_kv={kv_bytes/1024**2:6.1f}MB "
+                f"remaining={kv.kv_capacity/1024**3:6.2f}GB "
+                f"status={'ADMIT' if ok else 'REJECT'}"
+            )
 
+            if i == 200:
+                break
+
+    print("\n===== SUMMARY =====")
+    print("Admitted:", admitted)
+    print("Rejected:", rejected)
+    print("Remaining KV capacity (GB):", kv.kv_capacity / 1024**3)
