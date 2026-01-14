@@ -9,19 +9,30 @@ from vllm.entrypoints.openai.protocol import CompletionRequest
 from vllm.entrypoints.openai.api_server import create_completion
 from fastapi import Request
 
-
 from dataclasses import dataclass, field
 from typing import Any, Dict
 
 
+OPERATOR_LIST = ['sem_filter', 'sem_join', 'sem_groupby', 'sem_topk', 'sem_map', 'sem_agg']
+UNCETAIN_OPERATOR = ['sem_filter', 'sem_join']
+
+
+@dataclass(frozen=True)
+class SemanticInput:
+    data: str
+    token_len: int
+ 
+
+@dataclass
+class ExecutionState:
+    raw_request: Any
+    pin_req_id: Any
+
+
 @dataclass
 class SemContext:
-    raw_request: Any
-    data: Any
-    token_length: Any
-    question: Any
-    prefix_req_id: Any
-    prefix: Any
+    input: SemanticInput
+    state: ExecutionState
 
 
 def build_completion_request(prompt, max_tokens, pin=False):
@@ -55,18 +66,14 @@ async def evict_request(raw_request, req_id: str):
     async_llm = raw_request.app.state.engine_client  # AsyncLLM
     await async_llm.abort(req_id)
 
-
-OPERATOR_LIST = ['sem_filter', 'sem_join', 'sem_groupby', 'sem_topk', 'sem_map', 'sem_agg']
-UNCETAIN_OPERATOR = ['sem_filter', 'sem_join']
-
-
+ 
 
 class SemanticChain:
     def __init__(self, ctx, *ops, bytes_per_token: int):
         self.ctx = ctx
         self.ops = ops
         self.bytes_per_token = bytes_per_token
-        self.budget = self.estimate_token_budget(ctx.token_length)
+        self.budget = self.estimate_token_budget(ctx.input.token_len)
         
 
     # budget function should be updated based on operations
@@ -85,74 +92,87 @@ class SemanticChain:
 
 
     async def __call__(self):
-        value = self.ctx
-
+        next = True
         for op in self.ops:
-            reuse = await op(value)
+            if next:    
+                next = await op(self.ctx)
 
-            if isinstance(reuse, tuple):
-                value.prefix_req_id = reuse[1]
-                reuse = reuse[0]
-
-            if not reuse:
-                break
-
-        return value
 
 
 
 class BaseOp:
     max_len: int
+    is_last: bool = False
 
     async def __call__(self, ctx):
         raise NotImplementedError
 
 
 class SemFilter(BaseOp):
-    max_len = 10
+    def __init__(self, instruction, pin=False, is_last=False, max_len=10):   
+        self.instruction = instruction
+        self.pin = pin
+        self.is_last = is_last
+        self.max_len = max_len
 
     async def __call__(self, ctx):
         prompt = (
-            ctx.data
+            ctx.input.data
             + "\n\n"
-            + ctx.question["sem_filter"]
+            + self.instruction
             + "\n\n"
             + "Answer yes or no. Answer:"
         )
 
         res, req = await completion_call_internal(
-            ctx.raw_request,
+            ctx.state.raw_request,
             prompt,
             self.max_len,
-            pin=ctx.prefix
+            pin=(self.pin and not self.is_last)
         )
+        ctx.state.pin_req_id = res["id"]
 
-        return (True, res["id"])
+        # if the answer is no, we can evict the pinned kv immediately
+        if False:
+            engine = ctx.raw_request.app.state.engine_client
+            await engine.engine_core.call_utility_async(
+                "unpin_kv",
+                ctx.state.pin_req_id,
+            )
+
+        return True
 
     
 class SemMap(BaseOp):
-    max_len = 128
+    def __init__(self, instruction, pin=False, is_last=False, max_len=128):   
+        self.instruction = instruction
+        self.pin = pin
+        self.is_last = is_last
+        self.max_len = max_len
 
     async def __call__(self, ctx):
         prompt = (
-            ctx.data
+            ctx.input.data
             + "\n\n"
-            + ctx.question["sem_map"]
+            + self.instruction
             + "\n\n"
         )
 
         res, req = await completion_call_internal(
-            ctx.raw_request,
+            ctx.state.raw_request,
             prompt,
             self.max_len,
-            pin=False
+            pin=(self.pin and not self.is_last)
         )
 
-        if ctx.prefix:
-            engine = ctx.raw_request.app.state.engine_client
+        # sem_map always unpins the previous pin_req_id
+        if ctx.state.pin_req_id is not None:
+            engine = ctx.state.raw_request.app.state.engine_client
             await engine.engine_core.call_utility_async(
                 "unpin_kv",
-                ctx.prefix_req_id
+                ctx.state.pin_req_id,
             )
 
+        # TODO impl pin gen request if needed
+        pass
         return res["choices"][0]["text"]

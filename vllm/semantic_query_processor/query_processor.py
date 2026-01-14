@@ -17,12 +17,12 @@ class QueryProcessor:
         self.model_name = model_name
         self.kv_estimator = KVEstimator(model_name, budget)
 
-    # When engine is initialized, it acquires a sample request to access engine core
+
     def parse(self, query: Query):
         operations = [] # An operation consists of (data, operator) pairs 
         return operations
 
-    
+
     # TODO: Organize operations into a plan
     def plan(self, query: Query):
         print(f"[QueryProcessor] Planning for query: {query.query}")
@@ -43,23 +43,25 @@ class QueryProcessor:
             rows = list(reader)[:200]
             for row in rows:
                 yield ops.SemContext(
-                    raw_request=raw_request,
-                    data=str(row['Resume_str']).strip(),
-                    token_length=self.kv_estimator.token_length(str(row['Resume_str']).strip()),
-                    question={
-                        "sem_filter": "Is the candidate capable of GPU programming?",
-                        "sem_map": "Summarize the following resume.",
-                    },
-                    prefix_req_id=None,
-                    prefix=True
-            )
+                    input=ops.SemanticInput(
+                            data=str(row['Resume_str']).strip(),
+                            token_len=self.kv_estimator.token_length(str(row['Resume_str']).strip()),
+                        ),
+                    state=ops.ExecutionState(
+                        raw_request=raw_request,
+                        pin_req_id=None,
+                    )
+                )
 
 
     def _build_chain(self, ctx) -> ops.SemanticChain:
+        operators = (
+            ops.SemFilter("Is the candidate capable of GPU programming?", pin=True),
+            ops.SemMap("Summarize the following resume.", is_last=True),
+        )
         return ops.SemanticChain(
             ctx,
-            ops.SemFilter(),
-            ops.SemMap(),
+            *operators,
             bytes_per_token=self.kv_estimator.bytes_per_token,
         )
     
@@ -165,7 +167,7 @@ class QueryProcessor:
                             "sem_filter": "Is the candidate capable of GPU programming?",
                             "sem_map": "Sumamrize the following resume.",
                         },
-                        prefix_req_id=None,
+                        pin_req_id=None,
                         prefix=False
                     )
                     batch.append(ctx)
@@ -190,7 +192,7 @@ class QueryProcessor:
                             "sem_filter": "Is the candidate capable of GPU programming?",
                             "sem_map": "Sumamrize the following resume.",
                         },
-                        prefix_req_id=None,
+                        pin_req_id=None,
                         prefix=False
                     )
                     batch.append(ctx)
