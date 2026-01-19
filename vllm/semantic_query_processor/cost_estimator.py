@@ -1,17 +1,8 @@
-# Single-block implementation with dynamic bytes_per_token computation + test
-
 import csv
 from pathlib import Path
+
 import torch
 from transformers import AutoConfig, AutoTokenizer
-from dataclasses import dataclass
-
-
-@dataclass
-class KVConfig:
-    bytes_per_token: int
-    max_classifiy_tokens: int = 10
-    max_gen_tokens: int = 2048
 
 
 def compute_bytes_per_token(

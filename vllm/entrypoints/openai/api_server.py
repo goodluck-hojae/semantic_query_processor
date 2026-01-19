@@ -586,10 +586,10 @@ async def semantic_query(
 ):
     print("=== Semantic Execute Request ===")
     print("Query:")
-    print(sem_request.query)
+    print(sem_request.ops)
     print("data_path:") 
     print("================================")
-    _query = query.Query(sem_request.query, sem_request.data_path)
+    _query = query.Query(sem_request.ops, sem_request.data_path)
     print('query called')
     
     processor = raw_request.app.state.query_processor
@@ -599,6 +599,7 @@ async def semantic_query(
         "predicate_result": 'yes',
         "request_id": 'test',
     }
+
 
 @router.post("/v1/semantic/query_ref")
 async def semantic_query(

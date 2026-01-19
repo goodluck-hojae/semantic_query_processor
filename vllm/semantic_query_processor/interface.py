@@ -4,5 +4,5 @@ import csv
 
 
 class SemanticQueryRequest(BaseModel):
-    query: str
+    ops: str
     data_path: str
