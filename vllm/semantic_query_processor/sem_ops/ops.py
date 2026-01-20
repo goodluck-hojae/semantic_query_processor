@@ -1,13 +1,14 @@
 from .base import BaseOp, OpKind
+from vllm.semantic_query_processor.context import SemContext, SemanticInput, ExecutionState
 from .endpoint import unpin_request, completion_call_internal
 
 
 class SemFilter(BaseOp):
-    def __init__(self, instruction, pin=False, is_last=False, max_len=10):   
+    def __init__(self, instruction, pin=False, unpin=False, max_len=10):   
         self.kind = OpKind.TUPLE_INDEPENDENT
         self.instruction = instruction
         self.pin = pin
-        self.is_last = is_last
+        self.unpin = unpin
         self.max_len = max_len
 
     async def __call__(self, ctx):
@@ -23,14 +24,17 @@ class SemFilter(BaseOp):
             ctx.state.raw_request,
             prompt,
             self.max_len,
-            pin=(self.pin and not self.is_last)
+            pin=self.pin
         )
-        ctx.state.pin_req_id = res["id"]
 
         # if the answer is no, we can evict the pinned kv immediately
-        if False:
+        if ctx.state.pin_req_id is not None and self.unpin:
             engine = ctx.state.raw_request.app.state.engine_client
             await unpin_request(engine, ctx.state.pin_req_id)
+            ctx.state.pin_req_id = None
+
+        if self.pin:
+            ctx.state.pin_req_id = res["id"]
 
         return True
     
@@ -109,6 +113,33 @@ class SemGroupBy(BaseOp):
         return True
 
 
+class SemJoin(BaseOp):
+    def __init__(self, right_table):
+        self.kind = OpKind.BLOCKING
+        self.right_table = right_table
+
+    async def __call__(self, ctxs):
+        out = []
+
+        for ctx in ctxs:
+            for right in self.right_table:
+
+                new_ctx = SemContext(
+                    input=SemanticInput(
+                        data=ctx.input.data + "\n\n" + str(right.input.data),
+                        token_len=ctx.input.token_len * 2,  #  TODO
+                    ),
+                    state=ExecutionState(
+                        raw_request=ctx.state.raw_request,
+                        pin_req_id=None,
+                    ),
+                )
+                out.append(new_ctx)
+
+        return out
+
+
+
 class SemAgg(BaseOp):
     pass
 
@@ -124,7 +155,3 @@ class SemTopK(BaseOp):
     async def __call__(self, ctx):
         print('SemTopK called')
         return self.temp
-
-
-class SemJoin(BaseOp):
-    pass

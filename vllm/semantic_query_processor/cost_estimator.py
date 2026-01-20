@@ -41,13 +41,13 @@ class KVEstimator:
     def __init__(self, model_name: str, kv_capacity: int, dtype=torch.float16):
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.bytes_per_token = compute_bytes_per_token(model_name, dtype)
-        self.kv_capacity = kv_capacity
+        self.kv_capacity = kv_capacity * 0.95
     
     def token_length(self, text: str) -> int:
         return len(self.tokenizer.encode(text, add_special_tokens=False))
 
     def can_admit(self, budget: int) -> bool:
-        return budget <= self.kv_capacity
+        return budget < self.kv_capacity 
 
     def allocate(self, budget: int):
         # print(f"allocate remaining={self.kv_capacity/1024**3:6.2f}GB")

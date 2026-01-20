@@ -16,4 +16,5 @@ class BaseOp:
 class OpKind(Enum):
     TUPLE_INDEPENDENT = auto()   # sem_filter, sem_map, sem_groupby, sem_join
     TUPLE_DEPENDENT = auto()     # sem_topk, sem_agg, 
+    BLOCKING = auto()     # sem_topk, sem_agg, 
 

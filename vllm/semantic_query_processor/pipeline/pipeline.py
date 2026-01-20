@@ -1,4 +1,4 @@
-from ..sem_ops import base, ops
+from ..sem_ops import BaseOp, base, ops
 
 from vllm.semantic_query_processor.query import Query
 from vllm.semantic_query_processor.data import data
@@ -12,22 +12,15 @@ class SemanticPipeline:
         self.kv_estimator = kv_estimator
 
     def build(self, operators):
-        """
-        Returns:
-            [
-                (chain_builder, blocking_op),
-                ...
-            ]
-        """
 
-        def build_chain(chain_ops_snapshot):
-            def _builder(ctx):
+        def chain_builder(chain_ops_snapshot):
+            def _chain(ctx):
                 return SemanticChain(
                     ctx,
                     *chain_ops_snapshot,
                     bytes_per_token=self.kv_estimator.bytes_per_token,
                 )
-            return _builder
+            return _chain
 
         pipeline = []
         chain_ops = []
@@ -35,16 +28,19 @@ class SemanticPipeline:
         for op in operators:
             if op.kind == base.OpKind.TUPLE_INDEPENDENT:
                 chain_ops.append(op)
-            else:
-                pipeline.append(
-                    (build_chain(tuple(chain_ops)), op)
-                )
+                continue
+
+            # flush any pending chain
+            if chain_ops:
+                pipeline.append(chain_builder(tuple(chain_ops)))
                 chain_ops = []
 
+            # emit blocking op directly (JOIN, TopK, etc.)
+            pipeline.append(op)
+
+        # flush tail chain
         if chain_ops:
-            pipeline.append(
-                (build_chain(tuple(chain_ops)), None)
-            )
+            pipeline.append(chain_builder(tuple(chain_ops)))
 
         return pipeline
 
@@ -54,22 +50,26 @@ class SemanticPipeline:
 
         operators = (
             ops.SemFilter("Is the candidate capable of GPU programming?", pin=True),
-            ops.SemMap("Summarize the following resume.", is_last=True),
-            ops.SemMap("Test", is_last=True),
-            ops.SemTopK(ctxs),
-            ops.SemFilter("Is the candidate capable of GPU programming?", pin=True),
-            ops.SemMap("Summarize the following resume.", is_last=True),
+            ops.SemFilter("Is the candidate capable of GPU programming?"),
+            ops.SemFilter("Is the candidate capable of GPU programming?", unpin=True),
+            ops.SemJoin(ctxs),
+            ops.SemFilter("Is the candidate capable of GPU programming?", pin=False),
         )
 
         pipeline = self.build(operators)
 
-        for chain_builder, blocking_op in pipeline:
-            if chain_builder is not None:
-                ctxs = await self._execute_chain(ctxs, chain_builder)
+        for stage in pipeline:
+            # chain
+            print(f"{str(stage)} processing")
+            if callable(stage) and not isinstance(stage, BaseOp):
+                ctxs = await self._execute_chain(ctxs, stage)
+                continue
 
-            if blocking_op is not None:
-                ctxs = await blocking_op(ctxs)
-
+            # blocking op
+            ctxs = await stage(ctxs)
+            print('len(ctxs)', len(ctxs))
+            ctxs = ctxs[:100]
+        print(f"pipeline finished")
         return ctxs
 
 

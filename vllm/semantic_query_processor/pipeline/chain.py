@@ -27,6 +27,6 @@ class SemanticChain:
 
     async def __call__(self):
         next = True
-        for op in self.ops:
+        for idx, op in enumerate(self.ops):
             if next:    
                 next = await op(self.ctx)
