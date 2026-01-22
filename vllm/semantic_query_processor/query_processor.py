@@ -2,7 +2,7 @@ from pathlib import Path
 import csv
 
 from vllm.semantic_query_processor.sem_ops import ops
-from vllm.semantic_query_processor.budget import KVBudget
+from vllm.semantic_query_processor.budget import KVMemoryManager
 from vllm.semantic_query_processor.query import Query
 from vllm.semantic_query_processor.context import SemContext, SemanticInput, ExecutionState
 from vllm.semantic_query_processor.controller import SemanticPlan
@@ -11,7 +11,7 @@ from vllm.semantic_query_processor.controller import SemanticPlan
 class QueryProcessor:
     def __init__(self, model_name, budget):
         self.model_name = model_name
-        KVBudget.init(model_name, budget)
+        KVMemoryManager.init(model_name, budget)
 
 
     def parse(self, query: Query):
@@ -41,7 +41,7 @@ class QueryProcessor:
                 yield SemContext(
                     input=SemanticInput(
                             data=str(row['Resume_str']).strip(),
-                            token_len=KVBudget.get_instance().token_length(str(row['Resume_str']).strip()),
+                            token_len=KVMemoryManager.get_instance().token_length(str(row['Resume_str']).strip()),
                         ),
                     state=ExecutionState(
                         raw_request=raw_request,
@@ -54,7 +54,7 @@ class QueryProcessor:
         
         ctxs = list(self._data_source(raw_request, query))
 
-        pipeline = SemanticPlan()
-        await pipeline.execute(raw_request, query)
+        plan = SemanticPlan()
+        await plan.execute(raw_request, query)
 
         return ctxs

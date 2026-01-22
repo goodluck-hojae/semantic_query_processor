@@ -1,7 +1,9 @@
 from .base import BaseOp, OpKind
 from vllm.semantic_query_processor.context import SemContext, SemanticInput, ExecutionState
+from vllm.semantic_query_processor.budget import KVMemoryManager
 from .endpoint import unpin_request, completion_call_internal
 from typing import List
+
 
 class SemFilter(BaseOp):
     def __init__(self, instruction, pin=False, unpin=False, max_len=10):   
@@ -74,9 +76,6 @@ class SemMap(BaseOp):
         return res["choices"][0]["text"]
 
 
-        
-    
-
 class SemGroupBy(BaseOp):
     def __init__(self, groups, pin=False, unpin=False, max_len=20):   
         self.kind = OpKind.TUPLE_INDEPENDENT
@@ -139,31 +138,36 @@ class SemJoin(BaseOp):
 
 
 class SemAgg(BaseOp):
-
-    def __init__(self, instruction: str, max_tokens: int):
+    def __init__(self, instruction: str, max_tokens: int, concurrency: int = 8):
         self.kind = OpKind.BLOCKING
         self.instruction = instruction
         self.max_tokens = max_tokens
+        self.concurrency = concurrency
 
 
     async def __call__(self, ctxs: List[SemContext]) -> List[SemContext]:
-        aggregate_set = ctxs
+        working_set = list(ctxs)
 
-        while len(aggregate_set) > 1:
-            next_aggregate_set: List[SemContext] = []
-            chunks = self._chunk_by_tokens(aggregate_set)
+        while len(working_set) > 1:
+            chunks = self._chunk_by_tokens(working_set)
 
-            for chunk in chunks:
-                if len(chunk) == 1:
-                    next_aggregate_set.append(chunk[0])
-                    continue
+            # singletons pass through
+            passthrough = [c[0] for c in chunks if len(c) == 1]
+            reducible = [c for c in chunks if len(c) > 1]
 
-                merged = await self._reduce_chunk(chunk)
-                next_aggregate_set.append(merged)
+            if not reducible:
+                return passthrough
 
-            aggregate_set = next_aggregate_set
+            reduced = await KVMemoryManager.get_instance().execute_tasks(
+                seeds=reducible,
+                task_builder=self._build_reducer,
+                concurrency=self.concurrency,
+            )
 
-        return aggregate_set
+            working_set = passthrough + reduced
+
+        return working_set
+
 
     def _chunk_by_tokens(self, ctxs: List[SemContext]) -> List[List[SemContext]]:
         chunks = []
@@ -188,11 +192,37 @@ class SemAgg(BaseOp):
 
         return chunks
 
-    async def _reduce_chunk(self, chunk: List[SemContext]) -> SemContext:
-        """
-        Reduce N contexts into 1 via LLM.
-        """
 
+    def _build_reducer(self, chunk: List[SemContext]):
+        parent = self
+        kv_budget = KVMemoryManager.get_instance()
+
+        class Reducer:
+            def __init__(self, chunk: List[SemContext]):
+                self.chunk = chunk
+
+                prompt = ""
+                total_tokens = 0
+                for i, ctx in enumerate(chunk, 1):
+                    prompt += f"\n\nDocument {i}:\n{ctx.input.data}"
+                    total_tokens += ctx.input.token_len
+
+                prompt += "\n\n" + parent.instruction + "\n\n"
+
+                prompt_token_len = kv_budget.token_length(prompt)
+
+                self.budget = (
+                    (prompt_token_len + total_tokens)
+                    * kv_budget.bytes_per_token
+                )
+
+            async def __call__(self) -> SemContext:
+                return await parent._reduce_chunk(self.chunk)
+
+        return Reducer(chunk)
+
+
+    async def _reduce_chunk(self, chunk: List[SemContext]) -> SemContext:
         raw_request = chunk[0].state.raw_request
 
         prompt = ""
@@ -215,7 +245,7 @@ class SemAgg(BaseOp):
         return SemContext(
             input=SemanticInput(
                 data=text,
-                token_len=max(1, total_tokens // 2),  # conservative estimate
+                token_len=max(1, total_tokens // 2),
             ),
             state=ExecutionState(
                 raw_request=raw_request,

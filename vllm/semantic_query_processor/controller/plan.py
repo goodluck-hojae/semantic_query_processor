@@ -2,9 +2,8 @@ from ..sem_ops import BaseOp, base, ops
 
 from vllm.semantic_query_processor.query import Query
 from vllm.semantic_query_processor.data import data
-from vllm.semantic_query_processor.budget import KVBudget
+from vllm.semantic_query_processor.budget import KVMemoryManager
 from .pipeline import SemanticPipeline
-import asyncio
 
 
 class SemanticPlan:
@@ -19,7 +18,7 @@ class SemanticPlan:
                 return SemanticPipeline(
                     ctx,
                     *chain_ops_snapshot,
-                    bytes_per_token=KVBudget.get_instance().bytes_per_token,
+                    bytes_per_token=KVMemoryManager.get_instance().bytes_per_token,
                 )
             return _pipeline
 
@@ -59,7 +58,7 @@ class SemanticPlan:
             # chain
             print(f"{str(stage)} processing")
             if callable(stage) and not isinstance(stage, BaseOp):
-                ctxs = await self._execute_pipeline(ctxs, stage)
+                ctxs = await self._execute_plan(ctxs, stage)
                 continue
 
             # blocking op
@@ -70,38 +69,9 @@ class SemanticPlan:
         return ctxs
 
 
-    async def _execute_pipeline(self, ctxs, chain_builder, concurrency=100):
-        queue = asyncio.Queue(maxsize=concurrency)
-        capacity_cond = asyncio.Condition()
-        results = []
-
-        async def worker():
-            while True:
-                chain = await queue.get()
-                try:
-                    await chain()
-                    results.append(chain.ctx)
-                finally:
-                    async with capacity_cond:
-                        KVBudget.get_instance().release(chain.budget)
-                        capacity_cond.notify_all()
-                    queue.task_done()
-
-        workers = [asyncio.create_task(worker()) for _ in range(concurrency)]
-
-        for ctx in ctxs:
-            chain = chain_builder(ctx)
-
-            async with capacity_cond:
-                while not KVBudget.get_instance().can_admit(chain.budget):
-                    await capacity_cond.wait()
-                KVBudget.get_instance().allocate(chain.budget)
-
-            await queue.put(chain)
-
-        await queue.join()
-
-        for w in workers:
-            w.cancel()
-
-        return results
+    async def _execute_plan(self, ctxs, chain_builder, concurrency=100):
+        return await KVMemoryManager.get_instance().execute_tasks(
+            seeds=ctxs,
+            task_builder=chain_builder,
+            concurrency=concurrency,
+        )
