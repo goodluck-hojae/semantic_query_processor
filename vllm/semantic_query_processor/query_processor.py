@@ -2,16 +2,16 @@ from pathlib import Path
 import csv
 
 from vllm.semantic_query_processor.sem_ops import ops
-from vllm.semantic_query_processor.cost_estimator import KVEstimator
+from vllm.semantic_query_processor.budget import KVBudget
 from vllm.semantic_query_processor.query import Query
 from vllm.semantic_query_processor.context import SemContext, SemanticInput, ExecutionState
-from vllm.semantic_query_processor.pipeline import SemanticPipeline
+from vllm.semantic_query_processor.controller import SemanticPlan
 
 
 class QueryProcessor:
     def __init__(self, model_name, budget):
         self.model_name = model_name
-        self.kv_estimator = KVEstimator(model_name, budget)
+        KVBudget.init(model_name, budget)
 
 
     def parse(self, query: Query):
@@ -41,7 +41,7 @@ class QueryProcessor:
                 yield SemContext(
                     input=SemanticInput(
                             data=str(row['Resume_str']).strip(),
-                            token_len=self.kv_estimator.token_length(str(row['Resume_str']).strip()),
+                            token_len=KVBudget.get_instance().token_length(str(row['Resume_str']).strip()),
                         ),
                     state=ExecutionState(
                         raw_request=raw_request,
@@ -51,13 +51,10 @@ class QueryProcessor:
 
 
     async def execute(self, raw_request, query: Query):
+        
         ctxs = list(self._data_source(raw_request, query))
 
-        operators = (
-            ops.SemFilter("Is the candidate capable of GPU programming?", pin=True),
-            ops.SemMap("Summarize the following resume.", is_last=True),
-        )
-        pipeline = SemanticPipeline(self.kv_estimator)
+        pipeline = SemanticPlan()
         await pipeline.execute(raw_request, query)
 
         return ctxs

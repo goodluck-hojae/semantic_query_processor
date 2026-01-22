@@ -1,6 +1,6 @@
 import csv
 from pathlib import Path
-
+import threading
 import torch
 from transformers import AutoConfig, AutoTokenizer
 
@@ -36,39 +36,52 @@ def compute_bytes_per_token(
         dtype_bytes
     )
 
+# Singleton
+class KVBudget:
+    _instance = None
+    _lock = threading.Lock()
 
-class KVEstimator:
-    def __init__(self, model_name: str, kv_capacity: int, dtype=torch.float16):
+    def __init__(self, model_name, kv_capacity, dtype):
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.bytes_per_token = compute_bytes_per_token(model_name, dtype)
         self.kv_capacity = kv_capacity * 0.95
-    
+
+    @classmethod
+    def init(cls, model_name, kv_capacity, dtype=torch.float16):
+        with cls._lock:
+            if cls._instance is not None:
+                raise RuntimeError("KVBudget already initialized")
+
+            cls._instance = cls(model_name, kv_capacity, dtype)
+
+    @classmethod
+    def get_instance(cls):
+        if cls._instance is None:
+            raise RuntimeError("KVBudget not initialized")
+        return cls._instance
+
     def token_length(self, text: str) -> int:
         return len(self.tokenizer.encode(text, add_special_tokens=False))
 
     def can_admit(self, budget: int) -> bool:
-        return budget < self.kv_capacity 
+        return budget < self.kv_capacity
 
     def allocate(self, budget: int):
-        # print(f"allocate remaining={self.kv_capacity/1024**3:6.2f}GB")
         if not self.can_admit(budget):
             return False
         self.kv_capacity -= budget
         return True
-        
-    # When completed
+
     def release(self, budget: int):
-        # print(f"release remaining={self.kv_capacity/1024**3:6.2f}GB")
         self.kv_capacity += budget
         return True
-
 
 if __name__ == "__main__":
     MODEL = "meta-llama/Llama-3.2-3B-Instruct"
 
     KV_CAPACITY_BYTES = 7117927424
 
-    kv = KVEstimator(MODEL, KV_CAPACITY_BYTES)
+    kv = KVBudget(MODEL, KV_CAPACITY_BYTES)
 
     print("Bytes per token:", kv.bytes_per_token)
     print("Initial KV capacity (GB):", kv.kv_capacity / 1024**3)

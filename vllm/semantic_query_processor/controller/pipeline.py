@@ -2,7 +2,7 @@
 import asyncio
 
 
-class SemanticChain:
+class SemanticPipeline:
     def __init__(self, ctx, *ops, bytes_per_token: int):
         self.ctx = ctx
         self.ops = ops
