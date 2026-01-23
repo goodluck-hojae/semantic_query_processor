@@ -13,13 +13,15 @@ class SemanticPlan:
 
     def build(self, operators):
 
-        def pipeline_builder(chain_ops_snapshot):
+        def pipeline_builder(ops):
             def _pipeline(ctx):
                 return SemanticPipeline(
                     ctx,
-                    *chain_ops_snapshot,
+                    *ops,
                     bytes_per_token=KVMemoryManager.get_instance().bytes_per_token,
                 )
+            
+            _pipeline.ops = ops
             return _pipeline
 
         pipeline = []
@@ -47,9 +49,14 @@ class SemanticPlan:
 
     async def execute(self, raw_request, query: Query):
         ctxs = list(data._data_source(raw_request, query))
-
         operators = (
-            ops.SemAgg("Summarize the trend of resumes", 10000),
+            ops.SemFilter("Does this candidate have Computer Science degree?"),
+            # ops.SemFilter("Does this candidate have Computer Science degree?", pin=True),
+            # ops.SemFilter("Is the candidate capable of GPU programming?", unpin=True),
+            ops.SemMap("Summarize the resume"),
+            ops.SemTopK("Which candidate has batter qualification", k=5),
+            ops.SemMap("Extract key points of technical skills"),
+            
         )
 
         pipeline = self.build(operators)

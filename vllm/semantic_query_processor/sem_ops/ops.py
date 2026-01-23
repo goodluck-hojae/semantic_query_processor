@@ -42,7 +42,7 @@ class SemFilter(BaseOp):
     
 
 class SemMap(BaseOp):
-    def __init__(self, instruction, pin=False, max_len=128):   
+    def __init__(self, instruction, pin=False, max_len=256):   
         self.kind = OpKind.TUPLE_INDEPENDENT
         self.instruction = instruction
         self.pin = pin
@@ -254,14 +254,114 @@ class SemAgg(BaseOp):
         )
 
 
-class SemTopK(BaseOp):
-    def __init__(self, temp, pin=False, unpin=False, max_len=20):   
-        self.kind = OpKind.TUPLE_DEPENDENT
-        self.temp = temp
-        self.pin = pin
-        self.unpin = unpin
-        self.max_len = max_len
 
-    async def __call__(self, ctx):
-        print('SemTopK called')
-        return self.temp
+class SemTopK(BaseOp):
+    def __init__(self, instruction: str, k: int, max_tokens: int = 20, concurrency: int = 8):
+        self.kind = OpKind.BLOCKING
+        self.instruction = instruction
+        self.k = k
+        self.max_tokens = max_tokens
+        self.concurrency = concurrency
+
+    async def __call__(self, ctxs: List[SemContext]) -> List[SemContext]:
+        if len(ctxs) <= self.k:
+            return await self._rank(ctxs)
+
+        topk = await self._quickselect(ctxs, self.k)
+        return await self._rank(topk)
+
+
+    async def _quickselect(self, ctxs: List[SemContext], k: int) -> List[SemContext]:
+        if len(ctxs) <= k:
+            return ctxs
+
+        pivot = ctxs[0]
+        others = ctxs[1:]
+
+        better, worse = await self._partition(pivot, others)
+
+        if len(better) >= k:
+            return await self._quickselect(better, k)
+        else:
+            return better + await self._quickselect(worse, k - len(better))
+
+
+    async def _partition(self, pivot: SemContext, others: List[SemContext]):
+        kv = KVMemoryManager.get_instance()
+
+        def build_task(other: SemContext):
+            raw_request = pivot.state.raw_request
+            instruction = self.instruction
+            max_tokens = self.max_tokens
+
+            class CompareTask:
+                def __init__(self):
+                    self.prompt = (
+                        f"Document A:\n{pivot.input.data}\n\n"
+                        f"Document B:\n{other.input.data}\n\n"
+                        f"{instruction}\n"
+                        f"Answer with 'A' or 'B'.\n\nAnswer:"
+                    )
+                    tokens = kv.token_length(self.prompt)
+                    self.budget = tokens * kv.bytes_per_token
+
+                async def __call__(self):
+                    res, _ = await completion_call_internal(
+                        raw_request,
+                        self.prompt,
+                        max_tokens,
+                    )
+                    return other, res["choices"][0]["text"].strip().upper()
+
+            return CompareTask()
+
+        results = await kv.execute_tasks(
+            seeds=others,
+            task_builder=build_task,
+            concurrency=self.concurrency,
+        )
+
+        better, worse = [], []
+        for other, verdict in results:
+            if verdict.startswith("B"):
+                better.append(other)
+            else:
+                worse.append(other)
+
+        return better, worse
+
+
+    async def _rank(self, ctxs: List[SemContext]) -> List[SemContext]:
+        if len(ctxs) <= 1:
+            return ctxs
+
+        ranked: List[SemContext] = []
+
+        for ctx in ctxs:
+            inserted = False
+            for i, other in enumerate(ranked):
+                better = await self._compare(ctx, other)
+                if better:
+                    ranked.insert(i, ctx)
+                    inserted = True
+                    break
+            if not inserted:
+                ranked.append(ctx)
+
+        return ranked
+
+    async def _compare(self, a: SemContext, b: SemContext) -> bool:
+        raw_request = a.state.raw_request
+        prompt = (
+            f"Document A:\n{a.input.data}\n\n"
+            f"Document B:\n{b.input.data}\n\n"
+            f"{self.instruction}\n"
+            f"Answer with 'A' or 'B'.\n\nAnswer:"
+        )
+
+        res, _ = await completion_call_internal(
+            raw_request,
+            prompt,
+            self.max_tokens,
+        )
+        return res["choices"][0]["text"].strip().upper().startswith("A")

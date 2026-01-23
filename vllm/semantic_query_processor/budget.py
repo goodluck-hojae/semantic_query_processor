@@ -47,7 +47,6 @@ class KVMemoryManager:
         self._capacity = kv_capacity * 0.95
         self._lock = asyncio.Lock()
 
-
     @classmethod
     def init(cls, model_name, kv_capacity, dtype=torch.float16):
         with cls._lock:
@@ -65,6 +64,7 @@ class KVMemoryManager:
     def token_length(self, text: str) -> int:
         return len(self.tokenizer.encode(text, add_special_tokens=False))
 
+
     async def can_admit(self, budget: int) -> bool:
         async with self._lock:
             return budget <= self._capacity
@@ -81,8 +81,7 @@ class KVMemoryManager:
             self._capacity += budget
             return True
 
-
-    async def execute_tasks(self, seeds, task_builder, concurrency=50):
+    async def execute_tasks(self, seeds, task_builder, concurrency=20):
         queue = asyncio.Queue(maxsize=concurrency)
         capacity_cond = asyncio.Condition()
         results = []
@@ -117,55 +116,3 @@ class KVMemoryManager:
             w.cancel()
 
         return results
-
-
-
-
-if __name__ == "__main__":
-    MODEL = "meta-llama/Llama-3.2-3B-Instruct"
-
-    KV_CAPACITY_BYTES = 7117927424
-
-    kv = KVMemoryManager(MODEL, KV_CAPACITY_BYTES)
-
-    print("Bytes per token:", kv.bytes_per_token)
-    print("Initial KV capacity (GB):", kv.kv_capacity / 1024**3)
-
-    path = Path(
-        "/home/hojaeson_umass_edu/.cache/kagglehub/datasets/"
-        "snehaanbhawal/resume-dataset/versions/1/Resume/Resume.csv"
-    )
-
-    admitted = 0
-    rejected = 0
-
-    with path.open("r", encoding="utf-8", newline="") as f:
-        reader = csv.DictReader(f)
-
-        for i, row in enumerate(reader):
-            resume = row["Resume_str"].strip()
-
-            tokens = kv.count_tokens(resume)
-            kv_bytes = tokens * kv.bytes_per_token
-
-            ok = kv.add_request(resume)
-
-            if ok:
-                admitted += 1
-            else:
-                rejected += 1
-
-            print(
-                f"[{i:03d}] tokens={tokens:<5} "
-                f"req_kv={kv_bytes/1024**2:6.1f}MB "
-                f"remaining={kv.kv_capacity/1024**3:6.2f}GB "
-                f"status={'ADMIT' if ok else 'REJECT'}"
-            )
-
-            if i == 200:
-                break
-
-    print("\n===== SUMMARY =====")
-    print("Admitted:", admitted)
-    print("Rejected:", rejected)
-    print("Remaining KV capacity (GB):", kv.kv_capacity / 1024**3)
