@@ -395,27 +395,14 @@ class BlockPool:
         for block in blocks_list:
             block.ref_cnt -= 1
 
-        # Hojae
-        # self.free_block_queue.append_n(
-        #     [block for block in blocks_list if block.ref_cnt == 0 and not block.is_null]
-        # )
         self.free_block_queue.append_n(
             [
                 block for block in blocks_list
                 if block.ref_cnt == 0
                 and not block.is_null
-                and not block.pinned   # REQUIRED
+                and not block.pinned
             ]
         )
-        # self.free_block_queue.append_n(
-        #     [
-        #         block
-        #         for block in blocks_list
-        #         if block.ref_cnt == 0
-        #         and not block.is_null
-        #         and not block.pinned
-        #     ]
-        # )
 
 
 

@@ -7,18 +7,18 @@ from vllm.semantic_query_processor.context import SemContext, SemanticInput, Exe
 from vllm.semantic_query_processor.budget import KVMemoryManager
 
 
-def _data_source(raw_request, query: Query):
+def _data_source(raw_request, query: Query, executor):
     path = Path(query.data_path)
 
     if path.suffix.lower() == ".csv":
-        for ctx in _csv_reader(raw_request, path):
+        for ctx in _csv_reader(raw_request, path, executor):
             yield ctx
 
 
-def _csv_reader(raw_request, path: Path):
+def _csv_reader(raw_request, path: Path, executor):
     with path.open("r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
-        rows = list(reader)[:100]
+        rows = list(reader)[:30]
         for row in rows:
             yield SemContext(
                 input=SemanticInput(
@@ -28,5 +28,6 @@ def _csv_reader(raw_request, path: Path):
                 state=ExecutionState(
                     raw_request=raw_request,
                     pin_req_id=None,
+                    executor =executor
                 )
             )

@@ -1404,7 +1404,7 @@ class Scheduler(SchedulerInterface):
         if self.finished_req_ids_dict is not None:
             self.finished_req_ids_dict[request.client_index].add(request_id)
 
-        if not delay_free_blocks and request.pin_kv == False:
+        if not delay_free_blocks and request.pinned == False:
             self._free_blocks(request)
 
         return kv_xfer_params

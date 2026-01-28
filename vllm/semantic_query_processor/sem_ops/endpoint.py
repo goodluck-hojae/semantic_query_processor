@@ -17,7 +17,6 @@ def build_completion_request(prompt, max_tokens, pin=False):
         }
     )
 
-
 async def completion_call_internal(raw_request: Request, prompt, max_tokens, pin=False):
     req = build_completion_request(prompt, max_tokens, pin=pin)
 

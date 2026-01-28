@@ -44,10 +44,7 @@ class Request:
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
         block_hasher: Callable[["Request"], list["BlockHash"]] | None = None,
-        pin_kv: bool = False,  # Hojae
     ) -> None:
-        
-        # self.pin_kv = pin_kv  # Hojae
         self.request_id = request_id
         self.client_index = client_index
         self.priority = priority
@@ -164,8 +161,8 @@ class Request:
             block_hasher=block_hasher,
         )
                 
-        req.pin_kv = bool(
-            request.sampling_params.extra_args.get("pin_kv", False)
+        req.pinned = bool(
+            request.sampling_params.extra_args.get("pinned", False)
             if request.sampling_params and request.sampling_params.extra_args
             else False
         )

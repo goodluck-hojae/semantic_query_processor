@@ -339,14 +339,13 @@ class KVCacheManager:
         )
         self.coordinator.cache_blocks(request, num_tokens_to_cache)
 
-        if request.pin_kv:
-            self.pin_cached_blocks_for_request(request.request_id)
-        # self.pin_cached_blocks_for_request(request.request_id) # Hojae
+        if request.pinned:
+            self.pin_request(request.request_id) 
 
         return self.create_kv_cache_blocks(new_blocks)
 
 
-    def pin_cached_blocks_for_request(self, request_id):
+    def pin_request(self, request_id):
         blocks = self.coordinator.get_blocks(request_id)
 
         for group in blocks:
@@ -356,7 +355,7 @@ class KVCacheManager:
                 blk.pinned = True
 
 
-    def unpin_cached_blocks_for_request(self, request_id):
+    def unpin_request(self, request_id):
         blocks = self.coordinator.get_blocks(request_id)
 
         for group in blocks:
@@ -364,27 +363,7 @@ class KVCacheManager:
                 blk.pinned = False
         self.coordinator.free(request_id)
         
-
-    # def unpin_cached_blocks_for_request(self, request_id: str):
-    #     to_free = []
-    #     blocks = self.coordinator.get_blocks(request_id)
-
-    #     for group in blocks:
-    #         for blk in group:
-    #             if blk.is_null or blk.block_hash is None:
-    #                 continue
-
-    #             blk.pinned = False
-
-    #             # If free already happened while pinned, recover it
-    #             if blk.ref_cnt == 0:
-    #                 to_free.append(blk)
-
-    #     if to_free:
-    #         self.block_pool.free_block_queue.append_n(to_free)
-
-
-
+        
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.
         We free the blocks in reverse order so that the tail blocks are evicted
