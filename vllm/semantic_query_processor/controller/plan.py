@@ -47,22 +47,34 @@ class SemanticPlan:
         return pipeline
 
 
+    def print_plan(self, plan):
+        for stage in plan:
+            if callable(stage) and not isinstance(stage, BaseOp):
+                print(str(stage.ops))
+                continue
+            print(str(stage))
+
     async def execute(self, raw_request, query: Query):
         ctxs = list(data._data_source(raw_request, query, self.executor))
         operators = (
-            # ops.SemFilter("Does this candidate have Computer Science degree?", pin=True),
-            # ops.SemFilter("Is the candidate capable of GPU programming?", unpin=True),
-            ops.SemMap("Summarize the resume", use_output_as_prompt=False),
-            ops.SemMap("Summarize the resume", expand=True, max_len=2096, use_output_as_prompt=True, pin=True),
-            ops.SemMap("Summarize the resume", expand=False, use_output_as_prompt=True, pin=False),
+            ops.SemFilter("Does this candidate have Computer Science degree?", pin=True),
+            ops.SemFilter("Is the candidate capable of GPU programming?"),
+            ops.SemMap("Summarize the resume", expand=False, use_output_as_prompt=True),
+            ops.SemGroupBy(["More than 5 years experience", "Less than 5 years experience"]),
+            ops.SemTopK("Better qualifiaction on HR", k=5),
+            ops.SemAgg("Find common skillset")
+
+            # ops.SemMap("Summarize the resume", use_output_as_prompt=False),
+            # ops.SemMap("Summarize the resume", expand=True, max_len=2096, use_output_as_prompt=True, pin=True),
+            
             
         )
 
-        pipeline = self.build(operators)
-
-        for stage in pipeline:
+        plan = self.build(operators)
+        self.print_plan(plan)
+        for stage in plan:
             # chain
-            print(f"{str(stage)} processing")
+            print(f"{str(stage.ops)} processing")
             if callable(stage) and not isinstance(stage, BaseOp):
                 ctxs = await self._execute_plan(ctxs, stage)
                 continue
@@ -70,7 +82,6 @@ class SemanticPlan:
             # blocking op
             ctxs = await stage(ctxs)
             print('len(ctxs)', len(ctxs))
-            ctxs = ctxs[:50]
         print(f"pipeline finished")
         return ctxs
 

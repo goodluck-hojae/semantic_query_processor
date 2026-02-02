@@ -1,7 +1,3 @@
-
-import asyncio
-
-
 class SemanticPipeline:
     def __init__(self, ctx, *ops, bytes_per_token: int):
         self.ctx = ctx
@@ -12,16 +8,16 @@ class SemanticPipeline:
 
     # budget function should be updated based on operations
     def estimate_token_budget(self, prompt_token_len) -> int:
-        total_tokens = 0
-
+        max_boundary = -1
         for op in self.ops:
-            if not hasattr(op, "max_len"):
+            if not hasattr(op, "max_tokens"):
                 raise AttributeError(
-                    f"{op} must define `max_len`"
+                    f"{op} must define `max_tokens`"
                 )
-            total_tokens += op.max_len
+            if op.max_tokens > max_boundary:
+                max_boundary = op.max_tokens
 
-        self.budget = (prompt_token_len + total_tokens) * self.bytes_per_token
+        self.budget = (prompt_token_len + max_boundary) * self.bytes_per_token
         return self.budget
 
 
