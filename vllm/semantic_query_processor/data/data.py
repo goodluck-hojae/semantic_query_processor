@@ -18,7 +18,7 @@ def _data_source(raw_request, query: Query, executor):
 def _csv_reader(raw_request, path: Path, executor):
     with path.open("r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
-        rows = list(reader)[:30]
+        rows = list(reader)[:20]
         for row in rows:
             yield SemContext(
                 input=SemanticInput(

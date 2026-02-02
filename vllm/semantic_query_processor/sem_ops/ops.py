@@ -250,6 +250,7 @@ class SemJoin(BaseOp):
                     state=ExecutionState(
                         raw_request=ctx.state.raw_request,
                         pin_req_id=None,
+                        executor=ctx.executor
                     ),
                 )
                 out.append(new_ctx)
@@ -258,7 +259,7 @@ class SemJoin(BaseOp):
 
 
 class SemAgg(BaseOp):
-    def __init__(self, instruction: str, max_tokens: int = 8192, concurrency: int = 8):
+    def __init__(self, instruction: str, max_tokens: int = 2048, concurrency: int = 8):
         self.kind = OpKind.BLOCKING
         self.instruction = instruction
         self.max_tokens = max_tokens
@@ -271,20 +272,22 @@ class SemAgg(BaseOp):
         while len(working_set) > 1:
             chunks = self._chunk_by_tokens(working_set)
 
-            # singletons pass through
-            passthrough = [c[0] for c in chunks if len(c) == 1]
             reducible = [c for c in chunks if len(c) > 1]
+            passthrough = [c[0] for c in chunks if len(c) == 1]
 
-            if not reducible:
-                return passthrough
-
-            reduced = await KVMemoryManager.get_instance().execute_tasks(
-                seeds=reducible,
-                task_builder=self._build_reducer,
-                concurrency=self.concurrency,
-            )
-
-            working_set = passthrough + reduced
+            if reducible:
+                reduced = await KVMemoryManager.get_instance().execute_tasks(
+                    seeds=reducible,
+                    task_builder=self._build_reducer,
+                    concurrency=self.concurrency,
+                )
+                working_set = passthrough + reduced
+            else:
+                working_set = await KVMemoryManager.get_instance().execute_tasks(
+                    seeds=[working_set],
+                    task_builder=self._build_reducer,
+                    concurrency=1,
+                )
 
         return working_set
 
@@ -316,26 +319,20 @@ class SemAgg(BaseOp):
 
     def _build_reducer(self, chunk: List[SemContext]):
         parent = self
-        kv_budget = KVMemoryManager.get_instance()
-
+        
         class Reducer:
             def __init__(self, chunk: List[SemContext]):
                 self.chunk = chunk
 
                 prompt = ""
-                total_tokens = 0
                 for i, ctx in enumerate(chunk, 1):
                     prompt += f"\n\nDocument {i}:\n{ctx.input.data}"
-                    total_tokens += ctx.input.token_len
 
                 prompt += "\n\n" + parent.instruction + "\n\n"
 
-                prompt_token_len = kv_budget.token_length(prompt)
+                prompt_token_len = KVMemoryManager.get_instance().token_length(prompt)
 
-                self.budget = (
-                    (prompt_token_len + total_tokens)
-                    * kv_budget.bytes_per_token
-                )
+                self.budget = (prompt_token_len + parent.max_tokens) * KVMemoryManager.get_instance().bytes_per_token 
 
             async def __call__(self) -> SemContext:
                 return await parent._reduce_chunk(self.chunk)
@@ -363,18 +360,18 @@ class SemAgg(BaseOp):
             pin=False,
         )
 
-        text = result.text
-
-        return SemContext(
+        ctx = SemContext(
             input=SemanticInput(
-                data=text,
-                token_len=max(1, total_tokens // 2),
+                data=result.text,
+                token_len=KVMemoryManager.get_instance().token_length(result.text)
             ),
             state=ExecutionState(
                 raw_request=raw_request,
                 pin_req_id=None,
+                executor=executor
             ),
         )
+        return ctx
 
 
 class SemTopK(BaseOp):

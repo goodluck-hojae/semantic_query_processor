@@ -61,7 +61,7 @@ class SemanticPlan:
             ops.SemFilter("Is the candidate capable of GPU programming?"),
             ops.SemMap("Summarize the resume", expand=False, use_output_as_prompt=True),
             ops.SemGroupBy(["More than 5 years experience", "Less than 5 years experience"]),
-            ops.SemTopK("Better qualifiaction on HR", k=5),
+            ops.SemTopK("Better qualifiaction on HR", k=2),
             ops.SemAgg("Find common skillset")
 
             # ops.SemMap("Summarize the resume", use_output_as_prompt=False),
@@ -74,13 +74,15 @@ class SemanticPlan:
         self.print_plan(plan)
         for stage in plan:
             # chain
-            print(f"{str(stage.ops)} processing")
             if callable(stage) and not isinstance(stage, BaseOp):
+                print(f"{str(stage.ops)} processing")
                 ctxs = await self._execute_plan(ctxs, stage)
                 continue
 
             # blocking op
+            print(f"{str(stage)} processing")
             ctxs = await stage(ctxs)
+
             print('len(ctxs)', len(ctxs))
         print(f"pipeline finished")
         return ctxs
