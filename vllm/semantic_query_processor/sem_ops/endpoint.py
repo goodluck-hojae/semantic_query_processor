@@ -1,13 +1,14 @@
 import json
 
-from vllm.entrypoints.openai.protocol import CompletionRequest
+from vllm.entrypoints.openai.protocol import CompletionRequest, ChatCompletionRequest
 from vllm.entrypoints.openai.api_server import create_completion
 from fastapi import Request
 
 
 def build_completion_request(prompt, max_tokens, pin=False):
     return CompletionRequest(
-        model="meta-llama/Llama-3.2-3B-Instruct",
+        # model="meta-llama/Llama-3.2-3B-Instruct",
+        model="meta-llama/Llama-3.1-8B-Instruct",
         prompt=prompt,
         max_tokens=max_tokens,
         temperature=0.0,
@@ -16,6 +17,20 @@ def build_completion_request(prompt, max_tokens, pin=False):
             "pin_kv": pin,
         }
     )
+
+    
+# def build_completion_request(messages, max_tokens, pin=False):
+#     return ChatCompletionRequest(
+#         # model="meta-llama/Llama-3.2-3B",
+#         model="meta-llama/Llama-3.2-3B-Instruct",
+#         messages=messages,
+#         max_tokens=max_tokens,
+#         temperature=0.0,
+#         stream=False,
+#         vllm_xargs={
+#             "pin_kv": pin,
+#         },
+#     )
 
 async def completion_call_internal(raw_request: Request, prompt, max_tokens, pin=False):
     req = build_completion_request(prompt, max_tokens, pin=pin)
@@ -38,6 +53,6 @@ async def evict_request(raw_request, req_id: str):
 
 async def unpin_request(engine, req_id: str):
     await engine.engine_core.call_utility_async(
-        "unpin_kv",
+        "unpin_request",
         req_id
     )

@@ -4,7 +4,7 @@ from vllm.semantic_query_processor.query import Query
 from vllm.semantic_query_processor.data import data
 from vllm.semantic_query_processor.budget import KVMemoryManager
 from .pipeline import SemanticPipeline
-
+from collections import defaultdict
 
 class SemanticPlan:
 
@@ -56,22 +56,46 @@ class SemanticPlan:
 
     async def execute(self, raw_request, query: Query):
         ctxs = list(data._data_source(raw_request, query, self.executor))
-        operators = (
-            ops.SemFilter("Does this candidate have Computer Science degree?", pin=True),
-            ops.SemFilter("Is the candidate capable of GPU programming?"),
-            ops.SemMap("Summarize the resume", expand=False, use_output_as_prompt=True),
-            ops.SemGroupBy(["More than 5 years experience", "Less than 5 years experience"]),
-            ops.SemTopK("Better qualifiaction on HR", k=2),
-            ops.SemAgg("Find common skillset")
 
-            # ops.SemMap("Summarize the resume", use_output_as_prompt=False),
-            # ops.SemMap("Summarize the resume", expand=True, max_len=2096, use_output_as_prompt=True, pin=True),
-            
-            
+        # Filter-Filter
+        ff_operators = (
+            ops.SemFilter("The review contains substantive content, meaning it is not short (less than three sentences) or vague and expresses a concrete opinion about the movie", pin=True),
+            ops.SemFilter("The review criticizes the movie’s plot, storytelling, or narrative structure"),
+        )
+        # Filter-Filter-Map
+        ffm_operators = (
+            ops.SemFilter("The review contains substantive content, meaning it is not short (less than three sentences) or vague and expresses a concrete opinion about the movie", pin=True),
+            ops.SemFilter("The review criticizes the movie’s plot, storytelling, or narrative structure"),
+            ops.SemMap("Summarize the review"),
+        )
+ 
+        # Map-Filter-Filter
+        mff_operators = (
+            ops.SemMap("Summarize the review", pin=True),
+            ops.SemFilter("The review contains substantive content, meaningful or vague and expresses a concrete opinion about the movie"),
+            ops.SemFilter("The review criticizes the movie’s plot, storytelling, or narrative structure", unpin=True),
         )
 
-        plan = self.build(operators)
+        # Filter - GroupBy - Aggregation
+        groups = ["Positive", "Negative"]
+        fga_operators = (
+            ops.SemFilter("The review contains substantive content, meaning it is not short (less than three sentences) or vague and expresses a concrete opinion about the movie", pin=True),              
+            ops.SemGroupBy(groups, unpin=True),   
+            ops.SemAgg("Find the common opinion"),
+        )
+
+        # Join-Filter
+        research_categories = data.research_category_data()
+        jf_operators = (
+            ops.CartesianProduct(right_table=research_categories),
+            ops.SemFilter("Is the research paper related to the given category?", pin=True),
+            ops.SemMap("Summarize the research abstract and explain how it is related to the category"),
+        )
+
+        plan = self.build(jf_operators)
         self.print_plan(plan)
+                
+        
         for stage in plan:
             # chain
             if callable(stage) and not isinstance(stage, BaseOp):
@@ -84,7 +108,8 @@ class SemanticPlan:
             ctxs = await stage(ctxs)
 
             print('len(ctxs)', len(ctxs))
-        print(f"pipeline finished")
+        print(f"pipeline finished {len(ctxs)} results")
+
         return ctxs
 
 

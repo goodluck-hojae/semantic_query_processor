@@ -90,12 +90,13 @@ class KVMemoryManager:
             while True:
                 task = await queue.get()
                 try:
-                    out = await task()
-                    results.append(out if out is not None else task.ctx)
+                    await task()
+                    if task.ctx.state.predicate:
+                        results.append(task.ctx)
                 finally:
                     async with capacity_cond:
                         await self.release(task.budget)
-                        capacity_cond.notify_all()
+                        capacity_cond.notify_all() 
                     queue.task_done()
 
         workers = [asyncio.create_task(worker()) for _ in range(concurrency)]

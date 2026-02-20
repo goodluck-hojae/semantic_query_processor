@@ -14,7 +14,16 @@ class LLMExecutor(ABC):
     async def complete(
         self,
         raw_request,
-        prompt: str,
+        prompt,
+        max_tokens: int,
+        pin: bool = False,
+    ) -> CompletionResult:
+        pass
+
+    async def chatcomplete(
+        self,
+        raw_request,
+        prompt,
         max_tokens: int,
         pin: bool = False,
     ) -> CompletionResult:
