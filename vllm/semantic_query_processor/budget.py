@@ -45,8 +45,16 @@ class KVMemoryManager:
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.bytes_per_token = compute_bytes_per_token(model_name, dtype)
         self._capacity = kv_capacity * 0.95
+        self._stage_capacity = {}
+        self._stage_used = {}
         self._lock = asyncio.Lock()
 
+
+    def register_stage(self, stage_id: str, fraction: float):
+        cap = self._capacity * fraction
+        self._stage_capacity[stage_id] = cap
+        self._stage_used[stage_id] = 0
+        
     @classmethod
     def init(cls, model_name, kv_capacity, dtype=torch.float16):
         with cls._lock:
@@ -65,49 +73,100 @@ class KVMemoryManager:
         return len(self.tokenizer.encode(text, add_special_tokens=False))
 
 
-    async def can_admit(self, budget: int) -> bool:
+    async def can_admit(self, stage_id, budget):
         async with self._lock:
-            return budget <= self._capacity
+            return (
+                self._stage_used[stage_id] + budget
+                <= self._stage_capacity[stage_id]
+            )
 
-    async def allocate(self, budget: int):
+    async def allocate(self, stage_id, budget):
         async with self._lock:
-            if budget > self._capacity:
+            if self._stage_used[stage_id] + budget > self._stage_capacity[stage_id]:
                 return False
-            self._capacity -= budget
+
+            self._stage_used[stage_id] += budget
             return True
 
-    async def release(self, budget: int):
+
+    async def release(self, stage_id, budget):
         async with self._lock:
-            self._capacity += budget
-            return True
+            self._stage_used[stage_id] -= budget
 
+    # async def can_admit(self, budget: int) -> bool:
+    #     async with self._lock:
+    #         return budget <= self._capacity
+
+    # async def allocate(self, budget: int):
+    #     async with self._lock:
+    #         if budget > self._capacity:
+    #             return False
+    #         self._capacity -= budget
+    #         return True
+
+    # async def release(self, budget: int):
+    #     async with self._lock:
+    #         self._capacity += budget
+    #         return True
+    
     async def execute_tasks(self, seeds, task_builder, concurrency=20):
+
         queue = asyncio.Queue(maxsize=concurrency)
         capacity_cond = asyncio.Condition()
-        results = []
+        final_results = []
 
         async def worker():
             while True:
-                task = await queue.get()
+                pipeline = await queue.get()
                 try:
-                    await task()
-                    if task.ctx.state.predicate:
-                        results.append(task.ctx)
+                    out = await pipeline()
+
+                    # CASE 1: fan-out
+                    if isinstance(out, list):
+                        for child in out:
+
+                            async with capacity_cond:
+                                while not await self.can_admit(
+                                    child.stage_id, child.budget
+                                ):
+                                    await capacity_cond.wait()
+
+                                await self.allocate(
+                                    child.stage_id, child.budget
+                                )
+
+                            await queue.put(child)
+
+                    # CASE 2: leaf
+                    else:
+                        final_results.append(pipeline.ctx)
+
                 finally:
                     async with capacity_cond:
-                        await self.release(task.budget)
-                        capacity_cond.notify_all() 
+                        await self.release(
+                            pipeline.stage_id, pipeline.budget
+                        )
+                        capacity_cond.notify_all()
+
                     queue.task_done()
 
-        workers = [asyncio.create_task(worker()) for _ in range(concurrency)]
+        workers = [
+            asyncio.create_task(worker())
+            for _ in range(concurrency)
+        ]
 
+        # -----------------------------
+        # Submit tasks with stage quota
+        # -----------------------------
         for seed in seeds:
+
             task = task_builder(seed)
 
             async with capacity_cond:
-                while not await self.can_admit(task.budget):
+                while not await self.can_admit(task.stage_id, task.budget):
                     await capacity_cond.wait()
-                await self.allocate(task.budget)
+
+                await self.allocate(task.stage_id, task.budget)
 
             await queue.put(task)
 
@@ -116,4 +175,4 @@ class KVMemoryManager:
         for w in workers:
             w.cancel()
 
-        return results
+        return final_results

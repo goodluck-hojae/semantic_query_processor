@@ -1,9 +1,10 @@
-from ..sem_ops import BaseOp, base, ops
+from ..sem_ops import BaseOp, OpKind, base, ops
 
 from vllm.semantic_query_processor.query import Query
 from vllm.semantic_query_processor.data import data
 from vllm.semantic_query_processor.budget import KVMemoryManager
 from .pipeline import SemanticPipeline
+from .pipeline import pipeline_builder
 from collections import defaultdict
 
 class SemanticPlan:
@@ -13,39 +14,56 @@ class SemanticPlan:
 
     def build(self, operators):
 
-        def pipeline_builder(ops):
-            def _pipeline(ctx):
-                return SemanticPipeline(
-                    ctx,
-                    *ops,
-                    bytes_per_token=KVMemoryManager.get_instance().bytes_per_token,
-                )
-            
-            _pipeline.ops = ops
-            return _pipeline
-
         pipeline = []
         pipeline_ops = []
 
-        for op in operators:
-            if op.kind == base.OpKind.TUPLE_INDEPENDENT:
+        # find CartesianProduct index in operator list
+        join_index = None
+        for i, op in enumerate(operators):
+            if isinstance(op, ops.CartesianProduct):
+                join_index = i
+                break
+
+        for idx, op in enumerate(operators):
+
+            if op.kind == OpKind.TUPLE_INDEPENDENT:
                 pipeline_ops.append(op)
                 continue
 
-            # flush any pending chain
+            # flush chain before blocking op
             if pipeline_ops:
-                pipeline.append(pipeline_builder(tuple(pipeline_ops)))
+                if join_index is not None and idx <= join_index:
+                    stage_id = "pipeline_1"
+                else:
+                    stage_id = "pipeline_2"
+
+                pipeline.append(
+                    pipeline_builder(tuple(pipeline_ops), stage_id)
+                )
                 pipeline_ops = []
 
-            # emit blocking op directly (JOIN, TopK, etc.)
             pipeline.append(op)
 
-        # flush tail chain
+        # flush tail
         if pipeline_ops:
-            pipeline.append(pipeline_builder(tuple(pipeline_ops)))
+            if join_index is not None and len(operators) > join_index:
+                stage_id = "pipeline_2"
+            else:
+                stage_id = "pipeline_1"
+
+            pipeline.append(
+                pipeline_builder(tuple(pipeline_ops), stage_id)
+            )
+
+        # register quotas here
+        manager = KVMemoryManager.get_instance()
+        if join_index is not None:
+            manager.register_stage("pipeline_1", 0.05)
+            manager.register_stage("pipeline_2", 0.95)
+        else:
+            manager.register_stage("pipeline_2", 1.0)
 
         return pipeline
-
 
     def print_plan(self, plan):
         for stage in plan:
@@ -87,9 +105,9 @@ class SemanticPlan:
         # Join-Filter
         research_categories = data.research_category_data()
         jf_operators = (
+            ops.SemMap("Summarize the research abstract and explain how it is related to the category", pin=True),
             ops.CartesianProduct(right_table=research_categories),
-            ops.SemFilter("Is the research paper related to the given category?", pin=True),
-            ops.SemMap("Summarize the research abstract and explain how it is related to the category"),
+            ops.SemMap("Is the research paper related to the given category?"),
         )
 
         plan = self.build(jf_operators)

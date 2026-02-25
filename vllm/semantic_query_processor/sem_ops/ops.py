@@ -232,7 +232,7 @@ class SemMap(BaseOp):
 
 class CartesianProduct(BaseOp):
     def __init__(self, right_table):
-        self.kind = OpKind.BLOCKING
+        self.kind = OpKind.TUPLE_INDEPENDENT
         self.right_table = right_table
 
     def _build_prompt(self, data, data2):
@@ -241,23 +241,22 @@ class CartesianProduct(BaseOp):
         return prompt
 
 
-    async def __call__(self, ctxs):
+    def __call__(self, ctx):
         out = []
 
-        for ctx in ctxs:
-            for right in self.right_table:
-                new_ctx = SemContext(
-                    input=SemanticInput(
-                        left_input=ctx.input.data,
-                        right_input=right.input.data,
-                    ),
-                    state=ExecutionState(
-                        raw_request=ctx.state.raw_request,
-                        pin_req_id=None,
-                        executor=ctx.state.executor
-                    ),
-                    )
-                out.append(new_ctx)
+        for right in self.right_table:
+            new_ctx = SemContext(
+                input=SemanticInput(
+                    left_input=ctx.input.data,
+                    right_input=right.input.data,
+                ),
+                state=ExecutionState(
+                    raw_request=ctx.state.raw_request,
+                    pin_req_id=None,
+                    executor=ctx.state.executor
+                ),
+                )
+            out.append(new_ctx)
         return out
 
         
