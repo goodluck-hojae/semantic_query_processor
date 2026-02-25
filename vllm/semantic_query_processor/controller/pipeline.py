@@ -54,7 +54,7 @@ class SemanticPipeline:
             if estimated_tokens > max_boundary:
                 max_boundary = estimated_tokens
 
-        self.budget = estimated_tokens * self.bytes_per_token
+        self.budget = max_boundary * self.bytes_per_token
         return self.budget
 
 
