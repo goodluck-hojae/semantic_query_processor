@@ -106,13 +106,15 @@ class SemMap(BaseOp):
         max_tokens=256,
         chain_of_thought: bool = True,
         expand=False,
-        pin: bool = False,
+        pin=False,
+        unpin=False
     ):
         self.instruction = instruction
         self.max_tokens = max_tokens
         self.chain_of_thought = chain_of_thought
         self.expand = expand
         self.pin = pin
+        self.unpin = unpin
         self.instruction_token_len = KVMemoryManager.get_instance().token_length(self.instruction) + max_tokens
 
         if chain_of_thought and expand:
@@ -170,6 +172,13 @@ class SemMap(BaseOp):
         
             if self.pin:
                 ctx.state.pin_req_id = output.request_id
+
+            if self.unpin and ctx.state.pin_req_id:
+                await executor.unpin(
+                    raw_request,
+                    ctx.state.pin_req_id,
+                )
+                ctx.state.pin_req_id = None
 
             return ctx
         
@@ -232,7 +241,7 @@ class SemMap(BaseOp):
 
 class CartesianProduct(BaseOp):
     def __init__(self, right_table):
-        self.kind = OpKind.TUPLE_INDEPENDENT
+        self.kind = OpKind.JOIN
         self.right_table = right_table
 
     def _build_prompt(self, data, data2):
@@ -252,7 +261,7 @@ class CartesianProduct(BaseOp):
                 ),
                 state=ExecutionState(
                     raw_request=ctx.state.raw_request,
-                    pin_req_id=None,
+                    pin_req_id=ctx.state.pin_req_id,
                     executor=ctx.state.executor
                 ),
                 )

@@ -13,7 +13,12 @@ def pipeline_builder(ops, stage_id):
     _pipeline.stage_id = stage_id
     return _pipeline
 
-
+def is_pipeline_builder(obj):
+    return (
+        callable(obj)
+        and hasattr(obj, "ops")
+        and hasattr(obj, "stage_id")
+    )
 
 class SemanticPipeline:
     def __init__(self, ctx, *ops, bytes_per_token: int, stage_id: str):
