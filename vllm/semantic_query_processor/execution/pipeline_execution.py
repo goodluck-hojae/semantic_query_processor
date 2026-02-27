@@ -1,7 +1,29 @@
 import asyncio
 from vllm.semantic_query_processor.budget import KVMemoryManager
+from vllm.semantic_query_processor.sem_ops import OpKind, ops
 
-from ..sem_ops import ops
+class PlanExecutor:
+
+    def __init__(self):
+        self.pipeline_executor = AsyncPipelineExecutor()
+        self.blocking_executor = BlockingExecutor()
+
+    async def execute(self, ctxs, plan):
+
+        for item in plan:
+
+            # BLOCKING
+            if isinstance(item, ops.BaseOp) and item.kind == OpKind.BLOCKING:
+                ctxs = await item(ctxs)
+                
+            # SEGMENT
+            else:
+                ctxs = await self.pipeline_executor.execute_tasks(
+                    ctxs,
+                    item
+                )
+
+        return ctxs
 
 
 class AsyncPipelineExecutor:
@@ -16,12 +38,12 @@ class AsyncPipelineExecutor:
  
         async def release_allocs(allocs): 
             for stage_id, budget in allocs:
-                await self.manager.release(stage_id, budget)
+                await self.manager.release_stage(stage_id, budget)
 
         async def run_pipeline_stage(ctx, stage, owned_allocs):
             
             pipeline = stage(ctx)
-            await self.manager.acquire(pipeline.stage_id, pipeline.budget)
+            await self.manager.allocate_stage(pipeline.stage_id, pipeline.budget)
             owned_allocs.append((pipeline.stage_id, pipeline.budget))
             await pipeline()
             return pipeline.ctx
@@ -82,3 +104,53 @@ class AsyncPipelineExecutor:
                 out.append(r)
 
         return out
+    
+
+
+class BlockingExecutor:
+
+    @staticmethod
+    async def execute_tasks(
+        seeds,
+        task_builder,
+        concurrency: int = 20,
+    ):
+        manager = KVMemoryManager.get_instance()
+
+        queue = asyncio.Queue(maxsize=concurrency)
+        capacity_cond = asyncio.Condition()
+        results = []
+
+        async def worker():
+            while True:
+                task = await queue.get()
+                try:
+                    out = await task()
+                    results.append(out)
+                finally:
+                    async with capacity_cond:
+                        await manager.release(task.budget)
+                        capacity_cond.notify_all()
+                    queue.task_done()
+
+        workers = [
+            asyncio.create_task(worker())
+            for _ in range(concurrency)
+        ]
+
+        for seed in seeds:
+            task = task_builder(seed)
+
+            async with capacity_cond:
+                while not await manager.can_admit(task.budget):
+                    await capacity_cond.wait()
+                await manager.allocate(task.budget)
+
+            await queue.put(task)
+
+        await queue.join()
+
+        for w in workers:
+            w.cancel()
+
+        return results

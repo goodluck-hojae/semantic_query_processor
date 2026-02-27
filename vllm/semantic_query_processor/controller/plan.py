@@ -3,7 +3,7 @@ from ..sem_ops import BaseOp, OpKind, base, ops
 from vllm.semantic_query_processor.query import Query
 from vllm.semantic_query_processor.data import data
 from vllm.semantic_query_processor.budget import KVMemoryManager
-from vllm.semantic_query_processor.execution.pipeline_execution import AsyncPipelineExecutor
+from vllm.semantic_query_processor.execution.pipeline_execution import PlanExecutor
 from .pipeline import SemanticPipeline
 from .pipeline import pipeline_builder, is_pipeline_builder
 from collections import defaultdict
@@ -12,59 +12,88 @@ class SemanticPlan:
 
     def __init__(self, executor):
         self.executor = executor
-
-    def plan_resource(self, ctxs, plan): 
-        manager = KVMemoryManager.get_instance()
-        for pipeline in plan:
-            if isinstance(pipeline, BaseOp):
-                continue
-        # check left/right table on a pipeline and allocate resources accordingly
-        manager.register_stage(1, 0.8)
-        manager.register_stage(2, 0.2)
-            
-
-            
-        return "resource allocation done print some stuff"
+        self.plan_executor = PlanExecutor()
 
 
     def build(self, ctxs, operators):
 
         plan = []
-        pipeline_ops = []
 
-        stage_id = 1
+        current_segment = []          # [pipeline_stage, cp, pipeline_stage, ...]
+        pipeline_ops_chain = []       # tuple-independent ops to fuse
+        next_stage_id = 1             # global unique stage id
 
-        for idx, op in enumerate(operators):
+        def emit_pipeline():
+            nonlocal pipeline_ops_chain, current_segment, next_stage_id
 
+            if not pipeline_ops_chain:
+                return
 
-            if op.kind == OpKind.TUPLE_INDEPENDENT:
-                pipeline_ops.append(op)
-                continue
-
-            # flush chain before blocking op
-            if pipeline_ops: 
-                plan.append(
-                    pipeline_builder(tuple(pipeline_ops), stage_id)
-                )
-                pipeline_ops = []
-  
-            plan.append(op)
-
-            if op.kind == OpKind.BLOCKING:
-                stage_id = 1
-            elif isinstance(op, ops.CartesianProduct):
-                stage_id += 1
-
-
-        # flush tail
-        if pipeline_ops:
-            plan.append(
-                pipeline_builder(tuple(pipeline_ops), stage_id)
+            pipeline_stage = pipeline_builder(
+                tuple(pipeline_ops_chain),
+                next_stage_id
             )
 
-        resource_allocation = self.plan_resource(ctxs, plan)
-        # register quotas here
- 
+            current_segment.append(pipeline_stage)
+
+            next_stage_id += 1
+            pipeline_ops_chain = []
+
+        def flush_segment():
+            nonlocal current_segment
+
+            if not current_segment:
+                return
+
+            # collect stage_ids in this segment
+            stage_ids = [
+                item.stage_id
+                for item in current_segment
+                if hasattr(item, "stage_id")
+            ]
+
+            kv = KVMemoryManager.get_instance()
+            num_stages = len(stage_ids)
+
+            if num_stages == 1:
+                kv.register_stage(stage_ids[0], 1.0)
+
+            elif num_stages > 1:
+                primary_ratio = 0.8
+                remaining = 1.0 - primary_ratio
+
+                kv.register_stage(stage_ids[0], primary_ratio)
+
+                share = remaining / (num_stages - 1)
+                for sid in stage_ids[1:]:
+                    kv.register_stage(sid, share)
+
+            plan.append(current_segment)
+            current_segment = []
+
+        for op in operators:
+
+            if op.kind == OpKind.TUPLE_INDEPENDENT:
+                pipeline_ops_chain.append(op)
+                continue
+
+            # boundary encountered
+            emit_pipeline()
+
+            if op.kind == OpKind.JOIN:  # CP
+                current_segment.append(op)
+
+            elif op.kind == OpKind.BLOCKING:
+                flush_segment()
+                plan.append(op)
+
+            else:
+                raise ValueError(f"Unknown op kind: {op.kind}")
+
+        # tail flush
+        emit_pipeline()
+        flush_segment()
+
         return plan
 
 
@@ -75,6 +104,7 @@ class SemanticPlan:
                 print(str(stage.ops))
                 continue
             print(str(stage))
+
 
     async def execute(self, raw_request, query: Query):
         ctxs = list(data._data_source(raw_request, query, self.executor))
@@ -111,32 +141,13 @@ class SemanticPlan:
         jf_operators = (
             ops.SemMap("Summarize the research abstract and explain how it is related to the category", pin=True),
             ops.CartesianProduct(right_table=research_categories),
+            ops.SemAgg("Find the common opinion"),
             ops.SemFilter("Is the research paper related to the given category?"),
         )
 
         plan = self.build(ctxs, jf_operators)
         self.print_plan(plan)
                 
-        pipe = []
-        # ctxs = ctxs[:1]
-        for stage in plan:
-            
-            if not (isinstance(stage, ops.BaseOp) and stage.kind == OpKind.BLOCKING):
-                pipe.append(stage)
-            else:
-                ctxs = await self._execute_plan(ctxs, pipe)
-                ctxs = await stage(ctxs)
-                pipe = []
+        out = await self.plan_executor.execute(ctxs, plan)
+        return out 
 
-        if pipe:
-            ctxs = await self._execute_plan(ctxs, pipe)
-
-
-        print('len(ctxs)', len(ctxs))
-        print(f"pipeline finished {len(ctxs)} results")
-
-        return ctxs
-
-
-    async def _execute_plan(self, ctxs, pipeline):
-        return await AsyncPipelineExecutor().execute_tasks(ctxs, pipeline)

@@ -1,6 +1,7 @@
 from .base import BaseOp, OpKind
 from vllm.semantic_query_processor.context import SemContext, SemanticInput, ExecutionState
 from vllm.semantic_query_processor.budget import KVMemoryManager
+from vllm.semantic_query_processor.execution.pipeline_execution import BlockingExecutor
 from .prompt_utils import get_prompt
 from typing import List
 import json
@@ -27,8 +28,7 @@ class SemFilter(BaseOp):
 
 
     def estimate_tokens(self, ctx):
-        if ctx.input.data is None:
-            prompt = self._build_prompt(ctx)
+        prompt = self._build_prompt(ctx)
             
         prompt_str = KVMemoryManager.get_instance().tokenizer.apply_chat_template(
             prompt,
@@ -359,19 +359,24 @@ class SemAgg(BaseOp):
             passthrough = [c[0] for c in chunks if len(c) == 1]
 
             if reducible:
-                reduced = await KVMemoryManager.get_instance().execute_tasks(
+                reduced = await BlockingExecutor.execute_tasks(
                     seeds=reducible,
                     task_builder=self._build_reducer,
                     concurrency=self.concurrency,
                 )
+                
                 working_set = passthrough + reduced
             else:
-                working_set = await KVMemoryManager.get_instance().execute_tasks(
+                working_set = await BlockingExecutor.execute_tasks(
                     seeds=[working_set],
                     task_builder=self._build_reducer,
                     concurrency=1,
                 )
-
+                
+        working_set[0].output.append({
+            str(self.__class__): working_set[0].input.data
+        })
+        
         return working_set
 
 
@@ -520,7 +525,7 @@ class SemTopK(BaseOp):
 
             return CompareTask()
 
-        results = await KVMemoryManager.get_instance().execute_tasks(
+        results = await BlockingExecutor.execute_tasks(
             seeds=others,
             task_builder=build_task,
             concurrency=self.concurrency,
