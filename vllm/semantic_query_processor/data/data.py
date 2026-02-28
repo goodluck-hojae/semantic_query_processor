@@ -15,8 +15,8 @@ from vllm.semantic_query_processor.budget import KVMemoryManager
 #         for ctx in _message_reader(raw_request, path, executor):
 #             yield ctx
 
-def _data_source(raw_request, query: Query, executor):
-    path = Path(query.data_path)
+def _data_source(raw_request, data_path, executor):
+    path = Path(data_path)
 
     if path.is_dir():
         for txt_path in sorted(path.glob("*.txt"), key=lambda p: int(p.stem)):

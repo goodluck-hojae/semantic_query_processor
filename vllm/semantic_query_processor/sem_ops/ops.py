@@ -261,7 +261,7 @@ class CartesianProduct(BaseOp):
                 ),
                 state=ExecutionState(
                     raw_request=ctx.state.raw_request,
-                    pin_req_id=ctx.state.pin_req_id,
+                    pin_req_id=None,
                     executor=ctx.state.executor
                 ),
                 )
