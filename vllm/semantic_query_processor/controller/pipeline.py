@@ -60,4 +60,7 @@ class SemanticPipeline:
                         pipelines.append(pipeline)
                     return pipelines
                 next = await op(self.ctx)
-        return None
+
+                if next is False:
+                    return None
+        return self.ctx

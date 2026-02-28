@@ -40,16 +40,16 @@ class AsyncPipelineExecutor:
             for stage_id, budget in allocs:
                 await self.manager.release_stage(stage_id, budget)
 
-        async def run_pipeline_stage(ctx, stage, owned_allocs):
+        async def run_pipeline_stage(ctx, stage, local_allocs):
             
             pipeline = stage(ctx)
             await self.manager.allocate_stage(pipeline.stage_id, pipeline.budget)
-            owned_allocs.append((pipeline.stage_id, pipeline.budget))
-            await pipeline()
-            return pipeline.ctx
+            local_allocs.append((pipeline.stage_id, pipeline.budget))
+            result = await pipeline()
+            return result
 
-        async def run_ctx(ctx, remaining, pinned_allocs):
-            owned_allocs = []
+        async def run_ctx(ctx, remaining, inherited_allocs):
+            local_allocs = []
             try:
                 i = 0
                 cur_ctx = ctx
@@ -62,7 +62,7 @@ class AsyncPipelineExecutor:
 
                     # normal pipeline stage
                     if not isinstance(stage, ops.CartesianProduct):
-                        cur_ctx = await run_pipeline_stage(cur_ctx, stage, owned_allocs)
+                        cur_ctx = await run_pipeline_stage(cur_ctx, stage, local_allocs)
                         i += 1
                         continue
 
@@ -73,10 +73,10 @@ class AsyncPipelineExecutor:
                     if not new_ctxs:
                         return None  
                     
-                    child_pinned = pinned_allocs + owned_allocs
+                    child_inherited_allocs = inherited_allocs + local_allocs
 
-                    # Spawn children and wait for all, then parent can unpin its owned_allocs
-                    child_tasks = [asyncio.create_task(run_ctx(c, rest, child_pinned)) for c in new_ctxs]
+                    # Spawn children and wait for all, then parent can unpin its local_allocs
+                    child_tasks = [asyncio.create_task(run_ctx(c, rest, child_inherited_allocs)) for c in new_ctxs]
                     child_results = await asyncio.gather(*child_tasks, return_exceptions=False)
 
                     # Flatten results; filter out None
@@ -89,9 +89,9 @@ class AsyncPipelineExecutor:
                     return out
 
             finally:
-                await release_allocs(owned_allocs)
+                await release_allocs(local_allocs)
 
-        root_tasks = [asyncio.create_task(run_ctx(ctx, pipelines, pinned_allocs=[])) for ctx in ctxs]
+        root_tasks = [asyncio.create_task(run_ctx(ctx, pipelines, inherited_allocs=[])) for ctx in ctxs]
         root_results = await asyncio.gather(*root_tasks, return_exceptions=False)
 
         out = []

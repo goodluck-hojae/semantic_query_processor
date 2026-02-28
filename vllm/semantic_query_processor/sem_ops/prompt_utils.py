@@ -46,6 +46,14 @@ def get_prompt(instruction, data, data2=None, op='sem_filter'):
             "The output must strictly follow the condition and contain no extra commentary.\n"
             f"Condition:{instruction}\n"
         )
+    elif op == "sem_groupby":
+        operation = (
+            "You are presented with a context and a classification instruction.\n"
+            "Classify the context into exactly one of the provided groups.\n"
+            "The output must be one group name only.\n"
+            "Do not include explanations or extra text.\n"
+            f"Instruction:{instruction}\n"
+        )
 
     if data2 is not None:
         user_messages = [

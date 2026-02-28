@@ -18,7 +18,6 @@ class ExecutionState:
     pin_req_id: Any = None
     executor: LLMExecutor = None
     predicate: bool = True
-    group: str = ""
     idx: int=-1
     
 
