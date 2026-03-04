@@ -52,13 +52,6 @@ class SemanticPipeline:
         next = True
         for idx, op in enumerate(self.ops):
             if next:
-                if isinstance(op, ops.CartesianProduct):
-                    ctxs = op(self.ctx)
-                    pipelines = []
-                    for ctx in ctxs:
-                        pipeline = pipeline_builder(self.ops[idx+1:], self.stage_id)(ctx)
-                        pipelines.append(pipeline)
-                    return pipelines
                 next = await op(self.ctx)
 
                 if next is False:

@@ -2,12 +2,15 @@ from .base import BaseOp, OpKind
 from vllm.semantic_query_processor.context import SemContext, SemanticInput, ExecutionState
 from vllm.semantic_query_processor.budget import KVMemoryManager
 from vllm.semantic_query_processor.execution.pipeline_execution import BlockingExecutor
-from .prompt_utils import get_prompt
+from .prompt_utils import get_prompt, get_data_prompt
 from typing import List
 import json
 
 
 class SemFilter(BaseOp):
+
+    TRUE = 'true'
+
     def __init__(self, instruction, pin=False, unpin=False, max_tokens=64):
         self.kind = OpKind.TUPLE_INDEPENDENT
         self.instruction = instruction
@@ -16,19 +19,31 @@ class SemFilter(BaseOp):
         self.max_tokens = max_tokens
 
 
-    def _build_prompt(self, ctx):
-        
+    def _build_data_prompt(self, ctx):
         if ctx.input.data is not None:
-            prompt = get_prompt(self.instruction, ctx.input.data, op='sem_filter')
-        else:
-            prompt = get_prompt(self.instruction, ctx.input.left_input, ctx.input.right_input, op='sem_join')
+            return get_data_prompt(ctx.input.data)
+        return get_data_prompt(ctx.input.left_input, ctx.input.right_input)
 
 
-        return prompt
+    def _build_full_prompt(self, ctx):
+        if ctx.input.data is not None:
+            return get_prompt(self.instruction, ctx.input.data, op='sem_filter')
+        return get_prompt(
+            self.instruction,
+            ctx.input.left_input,
+            ctx.input.right_input,
+            op='sem_join',
+        )
+
+
+    def _build_prompts(self, ctx):
+        data_prompt = self._build_data_prompt(ctx)
+        full_prompt = self._build_full_prompt(ctx)
+        return data_prompt, full_prompt
 
 
     def estimate_tokens(self, ctx):
-        prompt = self._build_prompt(ctx)
+        _, prompt = self._build_prompts(ctx)
             
         prompt_str = KVMemoryManager.get_instance().tokenizer.apply_chat_template(
             prompt,
@@ -41,95 +56,107 @@ class SemFilter(BaseOp):
 
 
     async def __call__(self, ctx: SemContext):
-        prompt = self._build_prompt(ctx)
+        data_part, prompt = self._build_prompts(ctx)
+
+        # Data part is only required to bin
+        data_result = await ctx.state.executor.execute(
+                raw_request=ctx.state.raw_request,
+                prompt=data_part,
+                max_tokens=1,
+                pin=self.pin,
+        )
 
         result = await ctx.state.executor.execute(
                 raw_request=ctx.state.raw_request,
                 prompt=prompt,
                 max_tokens=self.max_tokens,
-                pin=self.pin,
+                pin=False,
         )
         verdict = result.text.strip().lower()
 
-        if "true" in verdict:
+        if SemFilter.TRUE in verdict:
             passed = True
         else:
             passed = False
-            ctx.state.predicate = False
         
         ctx.output.append({
             str(self.__class__): verdict
         })
         
-        if (not passed or self.unpin) and ctx.state.pin_req_id:
+        if self.unpin and ctx.state.pin_req_id is not None:
             await ctx.state.executor.unpin(
                 ctx.state.raw_request,
                 ctx.state.pin_req_id,
             )
             ctx.state.pin_req_id = None
-        elif (not passed or self.pin) and result.request_id is not None:
+
+        if passed and self.pin:
+            ctx.state.pin_req_id = data_result.request_id
+        elif self.pin and data_result.request_id is not None:
+            # Data part was pinned for this request, release it if filter failed.
             await ctx.state.executor.unpin(
                 ctx.state.raw_request,
-                result.request_id,
+                data_result.request_id,
             )
-        elif self.pin:
-            ctx.state.pin_req_id = result.request_id
 
         return passed
     
 
 
 class SemMap(BaseOp):
-    """
-    Case 1: chain_of_thought = True
-        - Retain input prompt KV cache and output context KV cache 
-        - Downstream prompt uses input (prompt + output context)
-        - pin output context KV cache blocks
-        - TUPLE_INDEPENDENT
-
-    Case 2: chain_of_thought = False AND max_tokens <= input_prompt_len
-        - Output replaces prompt
-        - Output length cannot exceed input
-        - No rebudgeting required, conservatively, it maintains existing budget
-        - TUPLE_INDEPENDENT
-
-    Case 3: chain_of_thought = False AND max_tokens > input_prompt_len
-        - Output replaces prompt
-        - Output exceeds input
-        - Requires rebudgeting, so plays as a blocking operator
-        - BLOCKING
-    """
-
     def __init__(
         self,
         instruction,
         max_tokens=256,
-        chain_of_thought: bool = True,
         expand=False,
         pin=False,
         unpin=False
     ):
         self.instruction = instruction
         self.max_tokens = max_tokens
-        self.chain_of_thought = chain_of_thought
         self.expand = expand
         self.pin = pin
         self.unpin = unpin
         self.instruction_token_len = KVMemoryManager.get_instance().token_length(self.instruction) + max_tokens
 
-        if chain_of_thought and expand:
-            self.kind = OpKind.BLOCKING
-        else:
-            self.kind = OpKind.TUPLE_INDEPENDENT
+        self.kind = OpKind.TUPLE_INDEPENDENT
+            
 
-    async def __call__(self, arg):
-        if self.kind == OpKind.BLOCKING:
-            # List[SemContext]
-            return await self._call_blocking(arg)
-        else:
-            # SemContext
-            return await self._call_tuple(arg)
+    async def __call__(self, ctx: SemContext):
+        
+        executor = ctx.state.executor
+        raw_request = ctx.state.raw_request 
 
+        prompt = self._build_prompt(ctx)
+
+        output = await ctx.state.executor.execute(
+            raw_request=raw_request,
+            prompt=prompt,
+            max_tokens=self.max_tokens,
+            pin=self.pin,
+        )
+        ctx.input = SemanticInput(
+            data=output.text,
+            token_len=KVMemoryManager.get_instance().token_length(output.text),
+        )
+        ctx.output.append({
+            str(self.__class__): output.text
+        })
+
+        if self.pin:
+            ctx.state.pin_req_id = output.request_id
+
+        elif self.unpin and ctx.state.pin_req_id:
+            await executor.unpin(
+                raw_request,
+                ctx.state.pin_req_id,
+            )
+            ctx.state.pin_req_id = None
+
+            
+
+        return ctx
+        
 
     def _build_prompt(self, ctx):
         if ctx.input.data is not None:
@@ -150,93 +177,7 @@ class SemMap(BaseOp):
         prompt_token_len = KVMemoryManager.get_instance().token_length(prompt_str)
         return prompt_token_len + self.max_tokens
 
-
-    async def _call_tuple(self, ctx: SemContext) -> SemContext:
-        executor = ctx.state.executor
-        raw_request = ctx.state.raw_request
-
-        prompt = self._build_prompt(ctx)
-
-
-        # Case 1 (Chain of thoughts)
-        if self.chain_of_thought:
-            output = await ctx.state.executor.execute(
-                raw_request=raw_request,
-                prompt=prompt,
-                max_tokens=self.max_tokens,
-                pin=self.pin,
-            )
-            ctx.output.append({
-                str(self.__class__): output.text
-            })
-        
-            if self.pin:
-                ctx.state.pin_req_id = output.request_id
-
-            if self.unpin and ctx.state.pin_req_id:
-                await executor.unpin(
-                    raw_request,
-                    ctx.state.pin_req_id,
-                )
-                ctx.state.pin_req_id = None
-
-            return ctx
-        
-        else:
-            #TODO do this later
-            # -------- Case 2 / Case 3 --------
-            output = await llm_func(
-                raw_request=raw_request,
-                prompt=message,
-                max_tokens=self.max_tokens,
-                pin=False,
-            )
-            
-            if ctx.state.pin_req_id is not None:
-                await executor.unpin(
-                    raw_request,
-                    ctx.state.pin_req_id,
-                )
-                ctx.state.pin_req_id = None
-
-            outcome_req = await llm_func(
-                raw_request=raw_request,
-                prompt=output.text,
-                max_tokens=1,
-                pin=self.pin,
-            )
-
-            if self.pin:
-                ctx.state.pin_req_id = outcome_req.request_id
-
-            ctx.input = SemanticInput(
-                data=output.text,
-                token_len=KVMemoryManager.get_instance().token_length(output.text),
-            )
-
-            return ctx
-
-
-    # Blocking (Case 3)
-    async def _call_blocking(self, ctxs):
-        parent = self
-
-        def task_builder(ctx: SemContext):
-            class MapTask:
-                def __init__(self, ctx):
-                    self.ctx = ctx
-                    self.budget = parent.max_tokens * KVMemoryManager.get_instance().bytes_per_token
-
-                async def __call__(self):
-                    return await parent._call_tuple(self.ctx)
-
-            return MapTask(ctx)
-
-        return await KVMemoryManager.get_instance().execute_tasks(
-            seeds=ctxs,
-            task_builder=task_builder,
-            concurrency=self.concurrency,
-        )
+ 
 
 
 class CartesianProduct(BaseOp):
