@@ -1,4 +1,4 @@
-from vllm.semantic_query_processor.sem_ops import OpKind, ops
+from vllm.semantic_query_processor.sem_ops import OpKind, OpName, ops
 from vllm.semantic_query_processor.query import Query
 from vllm.semantic_query_processor.data import data
 from vllm.semantic_query_processor.budget import KVMemoryManager
@@ -96,11 +96,22 @@ class SemanticPlan:
 
 
     def print_plan(self, plan):
-        for stage in plan:
-            if is_pipeline_builder(stage):
-                print(str(stage.ops))
-                continue
-            print(str(stage))
+        for i, item in enumerate(plan, start=1):
+            # PIPELINE: [pipe, cp, pipe, ...]
+            if isinstance(item, list):
+                print(f"[{i}] PIPELINE")
+                for j, stage in enumerate(item, start=1):
+                    if is_pipeline_builder(stage):
+                        op_names = [op.__class__.__name__ for op in stage.ops]
+                        print(
+                            f"  ({j}) PIPELINE stage_id={stage.stage_id} "
+                            f"ops={op_names}"
+                        )
+                    else:
+                        print(f"  ({j}) {stage.__class__.__name__}")
+            else:
+                # Blocking op
+                print(f"[{i}] BLOCKING {item.__class__.__name__}")
 
 
     def parse_ops(self, logical_ops):
@@ -120,21 +131,15 @@ class SemanticPlan:
                     return
 
                 first = chain[0]
-                last = chain[-1]
-                length = len(chain)
 
                 # Chain feeds CP
                 if next_kind == OpKind.JOIN:
                     first.pin = True
 
-                # Chain feeds BLOCKING
-                elif next_kind == OpKind.BLOCKING:
-                    first.pin = True
-                    last.unpin = True
-
                 # End of query
                 elif next_kind is None:
-                    if length > 1:
+                    if len(chain) > 1:
+                        last = chain[-1]
                         first.pin = True
                         last.unpin = True
 
@@ -156,6 +161,11 @@ class SemanticPlan:
                 else:
                     chain = []
 
+            for op in ops_list:
+                assert not (op.pin and op.unpin), (
+                    f"Invalid pin state for {op}: pin and unpin cannot both be True."
+                )
+
             return ops_list
 
         physical = []
@@ -164,35 +174,35 @@ class SemanticPlan:
             name = node["op"]
             args = node.get("args", {})
 
-            if name == "sem_filter":
+            if name == OpName.SEM_FILTER:
                 physical.append(
                     ops.SemFilter(
                         instruction=args["prompt"]
                     )
                 )
 
-            elif name == "sem_map":
+            elif name == OpName.SEM_MAP:
                 physical.append(
                     ops.SemMap(
                         instruction=args["prompt"]
                     )
                 )
 
-            elif name == "sem_groupby":
+            elif name in (OpName.SEM_CLASSIFY):
                 physical.append(
-                    ops.SemGroupBy(
-                        groups=args["groups"]
+                    ops.SemClassify(
+                        classes=args['classes']
                     )
                 )
 
-            elif name == "sem_agg":
+            elif name == OpName.SEM_AGG:
                 physical.append(
                     ops.SemAgg(
                         instruction=args["instruction"]
                     )
                 )
 
-            elif name == "join":
+            elif name == OpName.JOIN:
                 # Expand to CP + SemFilter
                 physical.append(
                     ops.CartesianProduct(
@@ -208,52 +218,9 @@ class SemanticPlan:
             else:
                 raise ValueError(f"Unknown op: {name}")
 
-        # --------------------------------------------------
-        # 2. Apply pin/unpin logic (no CP suppression)
-        # --------------------------------------------------
-
         apply_pin_unpin(physical)
 
         return tuple(physical)
-
-
-        # #todo "parse it"
-        # # Filter-Filter
-        # ff_operators = (
-        #     ops.SemFilter("The review contains substantive content, meaning it is not short (less than three sentences) or vague and expresses a concrete opinion about the movie", pin=True),
-        #     ops.SemFilter("The review criticizes the movie’s plot, storytelling, or narrative structure"),
-        # )
-        # # Filter-Filter-Map
-        # ffm_operators = (
-        #     ops.SemFilter("The review contains substantive content, meaning it is not short (less than three sentences) or vague and expresses a concrete opinion about the movie", pin=True),
-        #     ops.SemFilter("The review criticizes the movie’s plot, storytelling, or narrative structure"),
-        #     ops.SemMap("Summarize the review"),
-        # )
- 
-        # # Map-Filter-Filter
-        # mff_operators = (
-        #     ops.SemMap("Summarize the review", pin=True),
-        #     ops.SemFilter("The review contains substantive content, meaningful or vague and expresses a concrete opinion about the movie"),
-        #     ops.SemFilter("The review criticizes the movie’s plot, storytelling, or narrative structure", unpin=True),
-        # )
-
-        # # Filter - GroupBy - Aggregation
-        # groups = ["Positive", "Negative"]
-        # fga_operators = (
-        #     ops.SemFilter("The review contains substantive content, meaning it is not short (less than three sentences) or vague and expresses a concrete opinion about the movie", pin=True),              
-        #     ops.SemGroupBy(groups, unpin=True),   
-        #     ops.SemAgg("Find the common opinion"),
-        # )
-
-        # # Join-Filter
-        # research_categories = data.research_category_data()
-        # jf_operators = (
-        #     ops.SemMap("Summarize the research abstract and explain how it is related to the category", pin=True),
-        #     ops.CartesianProduct(right_table=research_categories),
-        #     ops.SemFilter("Is the research paper related to the given category?"),
-        #     ops.SemAgg("Find the common opinion"),
-        # )
-        # return jf_operators
 
 
     async def execute(self, raw_request, query: Query):
@@ -265,4 +232,3 @@ class SemanticPlan:
                 
         out = await self.plan_executor.execute(ctxs, plan)
         return out 
-

@@ -16,7 +16,7 @@ class PlanExecutor:
             if isinstance(item, ops.BaseOp) and item.kind == OpKind.BLOCKING:
                 ctxs = await item(ctxs)
                 
-            # SEGMENT
+            # PIPELINE
             else:
                 ctxs = await self.pipeline_executor.execute_tasks(
                     ctxs,
@@ -113,7 +113,7 @@ class BlockingExecutor:
     async def execute_tasks(
         seeds,
         task_builder,
-        concurrency: int = 20,
+        concurrency: int = 100,
     ):
         manager = KVMemoryManager.get_instance()
 

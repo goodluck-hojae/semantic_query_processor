@@ -1,2 +1,2 @@
 
-from .base import OpKind, BaseOp
+from .base import BaseOp, OpKind, OpName, OPERATOR_LIST

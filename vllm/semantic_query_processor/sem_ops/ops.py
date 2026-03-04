@@ -1,10 +1,9 @@
-from .base import BaseOp, OpKind
+from .base import BaseOp, OpKind, OpName
 from vllm.semantic_query_processor.context import SemContext, SemanticInput, ExecutionState
 from vllm.semantic_query_processor.budget import KVMemoryManager
 from vllm.semantic_query_processor.execution.pipeline_execution import BlockingExecutor
 from .prompt_utils import get_prompt, get_data_prompt
 from typing import List
-import json
 
 
 class SemFilter(BaseOp):
@@ -27,12 +26,12 @@ class SemFilter(BaseOp):
 
     def _build_full_prompt(self, ctx):
         if ctx.input.data is not None:
-            return get_prompt(self.instruction, ctx.input.data, op='sem_filter')
+            return get_prompt(self.instruction, ctx.input.data, op=OpName.SEM_FILTER)
         return get_prompt(
             self.instruction,
             ctx.input.left_input,
             ctx.input.right_input,
-            op='sem_join',
+            op=OpName.SEM_JOIN,
         )
 
 
@@ -102,7 +101,6 @@ class SemFilter(BaseOp):
         return passed
     
 
-
 class SemMap(BaseOp):
     def __init__(
         self,
@@ -122,49 +120,10 @@ class SemMap(BaseOp):
         self.kind = OpKind.TUPLE_INDEPENDENT
             
 
-    async def __call__(self, ctx: SemContext):
-        
-        executor = ctx.state.executor
-        raw_request = ctx.state.raw_request 
-
-        prompt = self._build_prompt(ctx)
-
-        output = await ctx.state.executor.execute(
-            raw_request=raw_request,
-            prompt=prompt,
-            max_tokens=self.max_tokens,
-            pin=self.pin,
-        )
-        ctx.input = SemanticInput(
-            data=output.text,
-            token_len=KVMemoryManager.get_instance().token_length(output.text),
-        )
-        ctx.output.append({
-            str(self.__class__): output.text
-        })
-
-        if self.pin:
-            ctx.state.pin_req_id = output.request_id
-
-        elif self.unpin and ctx.state.pin_req_id:
-            await executor.unpin(
-                raw_request,
-                ctx.state.pin_req_id,
-            )
-            ctx.state.pin_req_id = None
-
-            
-
-        return ctx
-        
-
     def _build_prompt(self, ctx):
-        if ctx.input.data is not None:
-            prompt = get_prompt(self.instruction, ctx.input.data, op='sem_map')
-        else:
-            prompt = get_prompt(self.instruction, ctx.input.left_input, ctx.input.right_input, op='sem_map')
-
-        return prompt
+        if ctx.input.data is None:
+            raise ValueError("SemMap requires ctx.input.data and does not support left/right inputs.")
+        return get_prompt(self.instruction, ctx.input.data, op=OpName.SEM_MAP)
     
 
     def estimate_tokens(self, ctx):
@@ -176,20 +135,51 @@ class SemMap(BaseOp):
         )
         prompt_token_len = KVMemoryManager.get_instance().token_length(prompt_str)
         return prompt_token_len + self.max_tokens
+    
+    
+    async def __call__(self, ctx: SemContext):
+        
+        executor = ctx.state.executor
+        raw_request = ctx.state.raw_request  
+
+        prompt = self._build_prompt(ctx)
+
+        output = await executor.execute(
+            raw_request=raw_request,
+            prompt=prompt,
+            max_tokens=self.max_tokens,
+            pin=self.pin,
+        )
+        prompt_str = KVMemoryManager.get_instance().tokenizer.apply_chat_template(
+            prompt,
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+        appended_text = f"{prompt_str}{output.text}"
+        ctx.input = SemanticInput(
+            data=appended_text,
+            token_len=KVMemoryManager.get_instance().token_length(appended_text),
+        )
+        ctx.output.append({
+            str(self.__class__): output.text
+        })
+
+        if self.pin:
+            ctx.state.pin_req_id = output.request_id
+        elif self.unpin and ctx.state.pin_req_id:
+            await executor.unpin(
+                raw_request,
+                ctx.state.pin_req_id,
+            )
+            ctx.state.pin_req_id = None
+
+        return ctx
 
  
-
-
 class CartesianProduct(BaseOp):
     def __init__(self, right_table):
         self.kind = OpKind.JOIN
         self.right_table = right_table
-
-    def _build_prompt(self, data, data2):
-
-        prompt = get_prompt(self.instruction, data, data2, op='sem_join')
-        return prompt
-
 
     def __call__(self, ctx):
         out = []
@@ -210,31 +200,37 @@ class CartesianProduct(BaseOp):
         return out
 
         
-
-
-class SemGroupBy(BaseOp):
-    def __init__(self, groups, pin=False, unpin=False):   
+class SemClassify(BaseOp):
+    def __init__(self, classes, pin=False, unpin=False):   
         self.kind = OpKind.TUPLE_INDEPENDENT
-        self.groups = list(groups)
+        self.classes = list(classes)
         self.pin = pin
         self.unpin = unpin
-        self.max_tokens = max(KVMemoryManager.get_instance().token_length(g) for g in self.groups) + 1
+        self.max_tokens = max(KVMemoryManager.get_instance().token_length(g) for g in self.classes) + 1
 
         self.instruction = "\n\n" \
-                + "Choose exactly one group from the list below.\n" \
-                + f"Groups: {', '.join(self.groups)}\n" \
-                + "Answer with the group name only:"
+                + "Choose exactly one class from the list below.\n" \
+                + f"Class: {', '.join(self.classes)}\n" \
+                + "Answer with the class name only:"
         self.instruction_token_len = KVMemoryManager.get_instance().token_length(self.instruction) + self.max_tokens + 1
 
 
-    def _build_prompt(self, ctx):
-        if ctx.input.data is not None:
-            prompt = get_prompt(self.instruction, ctx.input.data, op='sem_groupby')
-        return prompt
+    def _build_data_prompt(self, ctx):
+        return get_data_prompt(ctx.input.data)
+
+
+    def _build_full_prompt(self, ctx):
+        return get_prompt(self.instruction, ctx.input.data, op=OpName.SEM_CLASSIFY)
+
+
+    def _build_prompts(self, ctx):
+        data_prompt = self._build_data_prompt(ctx)
+        full_prompt = self._build_full_prompt(ctx)
+        return data_prompt, full_prompt
 
 
     def estimate_tokens(self, ctx):
-        prompt = self._build_prompt(ctx)
+        _, prompt = self._build_prompts(ctx)
             
         prompt_str = KVMemoryManager.get_instance().tokenizer.apply_chat_template(
             prompt,
@@ -247,18 +243,25 @@ class SemGroupBy(BaseOp):
 
 
     async def __call__(self, ctx: SemContext) -> SemContext: 
+ 
+        data_part, prompt = self._build_prompts(ctx)
 
-        prompt = self._build_prompt(ctx)
+        data_result = await ctx.state.executor.execute(
+                raw_request=ctx.state.raw_request,
+                prompt=data_part,
+                max_tokens=1,
+                pin=self.pin,
+        )
 
         result = await ctx.state.executor.execute(
                 raw_request=ctx.state.raw_request,
                 prompt=prompt,
                 max_tokens=self.max_tokens,
-                pin=self.pin,
+                pin=False,
         )
         group_result = result.text.strip().lower()
         group = ""
-        for g in self.groups:
+        for g in self.classes:
             if g.lower() in group_result:
                 group = g
                 break 
@@ -266,10 +269,11 @@ class SemGroupBy(BaseOp):
         ctx.output.append({
             str(self.__class__): str(group)
         })
-        if self.pin:
-            ctx.state.pin_req_id = result.request_id
 
-        if self.unpin and ctx.state.pin_req_id is not None:
+        if self.pin:
+            ctx.state.pin_req_id = data_result.request_id
+
+        elif self.unpin and ctx.state.pin_req_id is not None:
             await ctx.state.executor.unpin(ctx.state.raw_request, ctx.state.pin_req_id)
             ctx.state.pin_req_id = None
 
@@ -277,7 +281,7 @@ class SemGroupBy(BaseOp):
 
 
 class SemAgg(BaseOp):
-    def __init__(self, instruction: str, max_tokens: int = 2048, concurrency: int = 8):
+    def __init__(self, instruction: str, max_tokens: int = 8192, concurrency: int = 8):
         self.kind = OpKind.BLOCKING
         self.instruction = instruction
         self.max_tokens = max_tokens
@@ -286,6 +290,8 @@ class SemAgg(BaseOp):
 
     async def __call__(self, ctxs: List[SemContext]) -> List[SemContext]:
         working_set = list(ctxs)
+        if not working_set:
+            return []
 
         while len(working_set) > 1:
             chunks = self._chunk_by_tokens(working_set)
@@ -318,21 +324,25 @@ class SemAgg(BaseOp):
     def _chunk_by_tokens(self, ctxs: List[SemContext]) -> List[List[SemContext]]:
         chunks = []
         cur = []
-        cur_tokens = 0
+        instruction_overhead = KVMemoryManager.get_instance().token_length(
+            "\n\n" + self.instruction + "\n\n"
+        )
+        per_doc_overhead = KVMemoryManager.get_instance().token_length(
+            "\n\nDocument 1:\n"
+        )
+        cur_tokens = instruction_overhead
 
         for ctx in ctxs:
             t = ctx.input.token_len
-            # TODO here is a bug
-            if t > self.max_tokens:
-                raise RuntimeError("Single context exceeds max_tokens")
-
-            if cur_tokens + t > self.max_tokens:
+            item_tokens = t + per_doc_overhead
+            # Allow an oversized single item as its own chunk instead of failing early.
+            if cur and cur_tokens + item_tokens > self.max_tokens:
                 chunks.append(cur)
                 cur = []
-                cur_tokens = 0
+                cur_tokens = instruction_overhead
 
             cur.append(ctx)
-            cur_tokens += t
+            cur_tokens += item_tokens
 
         if cur:
             chunks.append(cur)
