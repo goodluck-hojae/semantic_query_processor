@@ -25,13 +25,17 @@ OPERATOR_LIST = [
 ]
 
 
-class BaseOp:
-    max_len: int
-
-    async def __call__(self, ctx):
-        raise NotImplementedError
-     
 class OpKind(Enum):
     TUPLE_INDEPENDENT = auto()   # sem_filter, sem_map, sem_classify, sem_join
     BLOCKING = auto()     # sem_topk, sem_agg, 
     JOIN = auto()     # join, cartesian product
+
+
+class BaseOp:
+    def __init__(self, kind, position):
+        self.kind = kind
+        self.position = position
+
+    async def __call__(self, ctx):
+        raise NotImplementedError
+     

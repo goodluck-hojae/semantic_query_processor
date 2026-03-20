@@ -3,6 +3,7 @@ from vllm.semantic_query_processor.query import Query
 from vllm.semantic_query_processor.data import data
 from vllm.semantic_query_processor.budget import KVMemoryManager
 from vllm.semantic_query_processor.execution.pipeline_execution import PlanExecutor
+from vllm.semantic_query_processor.controller.map_estimator import MapRatioEstimator
 from .pipeline import pipeline_builder, is_pipeline_builder
 
 class SemanticPlan:
@@ -10,6 +11,7 @@ class SemanticPlan:
     def __init__(self, executor):
         self.executor = executor
         self.plan_executor = PlanExecutor()
+        
 
 
     def build(self, ctxs, operators):
@@ -171,35 +173,40 @@ class SemanticPlan:
 
         physical = []
 
-        for node in logical_ops:
+        for idx, node in enumerate(logical_ops):
             name = node["op"]
             args = node.get("args", {})
 
             if name == OpName.SEM_FILTER:
                 physical.append(
                     ops.SemFilter(
-                        instruction=args["prompt"]
+                        instruction=args["prompt"],
+                        position=idx
                     )
                 )
 
             elif name == OpName.SEM_MAP:
                 physical.append(
                     ops.SemMap(
-                        instruction=args["prompt"]
+                        instruction=args["prompt"],
+                        position=idx
                     )
                 )
+                MapRatioEstimator
 
             elif name in (OpName.SEM_CLASSIFY):
                 physical.append(
                     ops.SemClassify(
-                        classes=args['classes']
+                        classes=args['classes'],
+                        position=idx
                     )
                 )
 
             elif name == OpName.SEM_AGG:
                 physical.append(
                     ops.SemAgg(
-                        instruction=args["instruction"]
+                        instruction=args["instruction"],
+                        position=idx
                     )
                 )
 
@@ -207,12 +214,14 @@ class SemanticPlan:
                 # Expand to CP + SemFilter
                 physical.append(
                     ops.CartesianProduct(
-                        right_table=args["right_table"]
+                        right_table=args["right_table"],
+                        position=idx
                     )
                 )
                 physical.append(
                     ops.SemFilter(
-                        instruction=args["predicate"]
+                        instruction=args["predicate"],
+                        position=idx
                     )
                 )
 
@@ -226,10 +235,12 @@ class SemanticPlan:
 
     async def execute(self, raw_request, query: Query):
         ctxs = list(data._data_source(raw_request, query.data_path, self.executor))
+        MapRatioEstimator.instance(int(len(ctxs) * 0.1))
         physical_ops = self.parse_ops(query.ops)
         
         plan = self.build(ctxs, physical_ops)
         self.print_plan(plan)
                 
         out = await self.plan_executor.execute(ctxs, plan)
+        MapRatioEstimator.instance().reset()
         return out 

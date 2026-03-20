@@ -2,6 +2,7 @@ from .base import BaseOp, OpKind, OpName
 from vllm.semantic_query_processor.context import SemContext, SemanticInput, ExecutionState
 from vllm.semantic_query_processor.budget import KVMemoryManager
 from vllm.semantic_query_processor.execution.pipeline_execution import BlockingExecutor
+from vllm.semantic_query_processor.controller.map_estimator import MapRatioEstimator
 from .prompt_utils import get_prompt, get_data_prompt
 from typing import List
 
@@ -11,7 +12,7 @@ class SemFilter(BaseOp):
     TRUE = 'true'
 
     def __init__(self, instruction, pin=False, unpin=False, max_tokens=64):
-        self.kind = OpKind.TUPLE_INDEPENDENT
+        super().__init__(kind=OpKind.TUPLE_INDEPENDENT)
         self.instruction = instruction
         self.pin = pin
         self.unpin = unpin
@@ -96,14 +97,17 @@ class SemFilter(BaseOp):
     
 
 class SemMap(BaseOp):
+    MAX_TOKEN_LIMIT = 8192
     def __init__(
         self,
         instruction,
-        max_tokens=256,
+        max_tokens=8192,
         expand=False,
         pin=False,
-        unpin=False
+        unpin=False,
+        position=-1
     ):
+        super().__init__(kind=OpKind.TUPLE_INDEPENDENT, position=position)
         self.instruction = instruction
         self.max_tokens = max_tokens
         self.expand = expand
@@ -111,8 +115,6 @@ class SemMap(BaseOp):
         self.unpin = unpin
         self.instruction_token_len = KVMemoryManager.get_instance().token_length(self.instruction) + max_tokens
 
-        self.kind = OpKind.TUPLE_INDEPENDENT
-            
 
     def _build_prompt(self, ctx):
         if ctx.input.data is None:
@@ -128,6 +130,8 @@ class SemMap(BaseOp):
             add_generation_prompt=False,
         )
         prompt_token_len = KVMemoryManager.get_instance().token_length(prompt_str)
+        ratio = MapRatioEstimator.instance().get_ratio(self.position)
+        self.max_tokens = int(ratio * prompt_str) if ratio else SemMap.MAX_TOKEN_LIMIT
         return prompt_token_len + self.max_tokens
     
     
@@ -138,30 +142,34 @@ class SemMap(BaseOp):
 
         prompt = self._build_prompt(ctx)
 
-
+        
         # For pinning generating tokens
         # if ctx.state.pin_req_id and not self.unpin:
         #     self.pin = True
             
-        output = await executor.execute(
-            raw_request=raw_request,
-            prompt=prompt,
-            max_tokens=2, #self.max_tokens,
-            pin=self.pin,
-        )
-
-        # resubmit if truncated
-        if output.finish_reason == "length":
-            if self.pin:
-                await executor.unpin(raw_request, output.request_id)
-            output = await executor.execute(raw_request=raw_request, prompt=prompt, max_tokens=self.max_tokens, pin=self.pin,)
-            
-
         prompt_str = KVMemoryManager.get_instance().tokenizer.apply_chat_template(
             prompt,
             tokenize=False,
             add_generation_prompt=False,
         )
+        input_token_len = KVMemoryManager.get_instance().token_length(prompt_str)
+
+        output = await executor.execute(
+            raw_request=raw_request,
+            prompt=prompt,
+            max_tokens=self.max_tokens,
+            pin=self.pin,
+        )
+         
+        # resubmit if truncated
+        if output.finish_reason == "length":
+            if self.pin:
+                await executor.unpin(raw_request, output.request_id)
+            output = await executor.execute(raw_request=raw_request, prompt=prompt, max_tokens=None, pin=self.pin,)
+
+        # Update ratio
+        MapRatioEstimator.instance().update(self.position, input_token_len, KVMemoryManager.get_instance().token_length(output.text))
+            
         appended_text = f"{prompt_str}{output.text}"
         ctx.input = SemanticInput(
             data=appended_text,
@@ -181,8 +189,8 @@ class SemMap(BaseOp):
 
  
 class CartesianProduct(BaseOp):
-    def __init__(self, right_table):
-        self.kind = OpKind.JOIN
+    def __init__(self, right_table, position=-1):
+        super().__init__(kind=OpKind.JOIN, position=position)
         self.right_table = right_table
 
     def __call__(self, ctx):
@@ -205,8 +213,8 @@ class CartesianProduct(BaseOp):
 
         
 class SemClassify(BaseOp):
-    def __init__(self, classes, pin=False, unpin=False):   
-        self.kind = OpKind.TUPLE_INDEPENDENT
+    def __init__(self, classes, pin=False, unpin=False, position=-1):
+        super().__init__(kind=OpKind.TUPLE_INDEPENDENT, position=position)
         self.classes = list(classes)
         self.pin = pin
         self.unpin = unpin
@@ -285,8 +293,8 @@ class SemClassify(BaseOp):
 
 
 class SemAgg(BaseOp):
-    def __init__(self, instruction: str, max_tokens: int = 8192, concurrency: int = 8):
-        self.kind = OpKind.BLOCKING
+    def __init__(self, instruction: str, max_tokens: int = 8192, concurrency: int = 8, position=-1):
+        super().__init__(kind=OpKind.BLOCKING)
         self.instruction = instruction
         self.max_tokens = max_tokens
         self.concurrency = concurrency
@@ -413,7 +421,8 @@ class SemAgg(BaseOp):
 
 class SemTopK(BaseOp):
     def __init__(self, instruction: str, k: int= 10, concurrency: int = 20):
-        self.kind = OpKind.BLOCKING
+        super().__init__(kind=OpKind.BLOCKING)
+        
         self.instruction = instruction
         self.k = k
         self.max_tokens = 5

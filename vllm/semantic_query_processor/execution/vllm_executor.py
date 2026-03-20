@@ -69,7 +69,7 @@ class VLLMExecutor(LLMExecutor):
         return CompletionResult(
             text=data['choices'][0]['message']['content'],
             request_id=data["id"],
-            finish_reason=data["choices"][0]["finish_reason"]
+            finish_reason=data["choices"][0].get("finish_reason", "")
         )
 
 
