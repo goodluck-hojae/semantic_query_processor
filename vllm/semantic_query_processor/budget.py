@@ -46,7 +46,7 @@ class KVMemoryManager:
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.bytes_per_token = compute_bytes_per_token(model_name, dtype)
 
-        self._capacity = kv_capacity * 0.95
+        self._capacity = kv_capacity 
         self._global_used = 0
 
         self._stage_capacity = {}

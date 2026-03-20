@@ -83,20 +83,14 @@ class SemFilter(BaseOp):
         })
         
         if self.unpin and ctx.state.pin_req_id is not None:
-            await ctx.state.executor.unpin(
-                ctx.state.raw_request,
-                ctx.state.pin_req_id,
-            )
+            await ctx.state.executor.unpin(ctx.state.raw_request, ctx.state.pin_req_id)
             ctx.state.pin_req_id = None
 
         if passed and self.pin:
             ctx.state.pin_req_id = data_result.request_id
         elif self.pin and data_result.request_id is not None:
             # Data part was pinned for this request, release it if filter failed.
-            await ctx.state.executor.unpin(
-                ctx.state.raw_request,
-                data_result.request_id,
-            )
+            await ctx.state.executor.unpin(ctx.state.raw_request, data_result.request_id)
 
         return passed
     
@@ -144,12 +138,25 @@ class SemMap(BaseOp):
 
         prompt = self._build_prompt(ctx)
 
+
+        # For pinning generating tokens
+        # if ctx.state.pin_req_id and not self.unpin:
+        #     self.pin = True
+            
         output = await executor.execute(
             raw_request=raw_request,
             prompt=prompt,
-            max_tokens=self.max_tokens,
+            max_tokens=2, #self.max_tokens,
             pin=self.pin,
         )
+
+        # resubmit if truncated
+        if output.finish_reason == "length":
+            if self.pin:
+                await executor.unpin(raw_request, output.request_id)
+            output = await executor.execute(raw_request=raw_request, prompt=prompt, max_tokens=self.max_tokens, pin=self.pin,)
+            
+
         prompt_str = KVMemoryManager.get_instance().tokenizer.apply_chat_template(
             prompt,
             tokenize=False,
@@ -167,10 +174,7 @@ class SemMap(BaseOp):
         if self.pin:
             ctx.state.pin_req_id = output.request_id
         elif self.unpin and ctx.state.pin_req_id:
-            await executor.unpin(
-                raw_request,
-                ctx.state.pin_req_id,
-            )
+            await executor.unpin(raw_request, ctx.state.pin_req_id)
             ctx.state.pin_req_id = None
 
         return ctx

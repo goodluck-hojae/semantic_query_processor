@@ -162,6 +162,7 @@ class SemanticPlan:
                     chain = []
 
             for op in ops_list:
+                print(f"op: {op}, pin: {op.pin} unpin: {op.unpin}")
                 assert not (op.pin and op.unpin), (
                     f"Invalid pin state for {op}: pin and unpin cannot both be True."
                 )

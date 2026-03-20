@@ -69,6 +69,7 @@ class VLLMExecutor(LLMExecutor):
         return CompletionResult(
             text=data['choices'][0]['message']['content'],
             request_id=data["id"],
+            finish_reason=data["choices"][0]["finish_reason"]
         )
 
 
@@ -93,6 +94,7 @@ class VLLMExecutor(LLMExecutor):
         return CompletionResult(
             text=data["choices"][0]["text"],
             request_id=data["id"],
+            finish_reason=data["choices"][0].get("finish_reason", ""),
         )
 
     async def unpin(self, raw_request: Request, request_id: str):

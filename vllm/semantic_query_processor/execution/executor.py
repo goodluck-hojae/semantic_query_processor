@@ -4,9 +4,10 @@ from typing import Optional
 
 
 class CompletionResult:
-    def __init__(self, text: str, request_id: str):
+    def __init__(self, text: str, request_id: str, finish_reason=""):
         self.text = text
         self.request_id = request_id
+        self.finish_reason = finish_reason
 
 
 class LLMExecutor(ABC):
