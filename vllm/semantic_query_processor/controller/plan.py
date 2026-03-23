@@ -5,6 +5,7 @@ from vllm.semantic_query_processor.budget import KVMemoryManager
 from vllm.semantic_query_processor.execution.pipeline_execution import PlanExecutor
 from vllm.semantic_query_processor.controller.map_estimator import MapRatioEstimator
 from .pipeline import pipeline_builder, is_pipeline_builder
+import math
 
 class SemanticPlan:
 
@@ -57,15 +58,12 @@ class SemanticPlan:
             if num_stages == 1:
                 kv.register_stage(stage_ids[0], 1.0)
 
+            
+            # initially allocate resource equally
+            # And warm up for allocation
             elif num_stages > 1:
-                primary_ratio = 0.8
-                remaining = 1.0 - primary_ratio
-
-                kv.register_stage(stage_ids[0], primary_ratio)
-
-                share = remaining / (num_stages - 1)
-                for sid in stage_ids[1:]:
-                    kv.register_stage(sid, share)
+                for sid in stage_ids[0:]:
+                    kv.register_stage(sid, 1 / num_stages)
 
             plan.append(current_segment)
             current_segment = []
@@ -214,13 +212,13 @@ class SemanticPlan:
                 # Expand to CP + SemFilter
                 physical.append(
                     ops.CartesianProduct(
-                        right_table=args["right_table"],
+                        right_table=list(data._data_source(None, args["right_table"], None)),
                         position=idx
                     )
                 )
                 physical.append(
                     ops.SemFilter(
-                        instruction=args["predicate"],
+                        instruction=args["instruction"],
                         position=idx
                     )
                 )
@@ -233,14 +231,46 @@ class SemanticPlan:
         return tuple(physical)
 
 
+    
+    async def warmup(self, ctxs, plan):
+        #sample
+        out, stage_stat_list = await self.plan_executor.execute(ctxs[:int(len(ctxs)* 0.1)], plan)
+        kv_manager = KVMemoryManager.get_instance()
+
+        _max_len = -1
+        for ctx in ctxs:
+            token_len = kv_manager.token_length(ctx.input.data)
+            _max_len = token_len if token_len > _max_len else _max_len
+
+        for stages in stage_stat_list:
+            sorted_items = sorted(stages.items(), key=lambda x: float(x[0]))
+
+            sum_allocation = 0
+            a = 10
+            for i, (s, inout) in enumerate(sorted_items):
+                ratio = inout['input'] / inout['output']
+
+                if i == len(sorted_items) - 1:
+                    allocation = kv_manager.capacity() - sum_allocation
+                else:
+                    allocation = (math.ceil(ratio) + a) * _max_len * kv_manager.bytes_per_token
+                    sum_allocation += allocation
+
+                print(s, ratio)
+                kv_manager.register_stage(s, allocation)
+                    
+        pass
+        
+
     async def execute(self, raw_request, query: Query):
+        
         ctxs = list(data._data_source(raw_request, query.data_path, self.executor))
         MapRatioEstimator.instance(int(len(ctxs) * 0.1))
         physical_ops = self.parse_ops(query.ops)
-        
         plan = self.build(ctxs, physical_ops)
         self.print_plan(plan)
                 
-        out = await self.plan_executor.execute(ctxs, plan)
+        out = await self.warmup(ctxs, plan)
+        out, _ = await self.plan_executor.execute(ctxs, plan)
         MapRatioEstimator.instance().reset()
         return out 

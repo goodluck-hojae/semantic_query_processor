@@ -10,7 +10,7 @@ class MapRatioEstimator:
         self.minimum_sample_size = sample_size
 
     @classmethod
-    def instance(cls, sample_size: int = 50):
+    def instance(cls, sample_size: int = 10):
         if cls._instance is None:
             cls._instance = cls(sample_size)
         return cls._instance

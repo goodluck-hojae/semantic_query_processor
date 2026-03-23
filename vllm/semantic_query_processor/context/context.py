@@ -1,17 +1,25 @@
 
 from typing import Any, Dict, List
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from vllm.semantic_query_processor.execution.vllm_executor import LLMExecutor
+from vllm.semantic_query_processor.sem_ops.prompt_utils import get_data_prompt
 
-
-@dataclass(frozen=True)
-class SemanticInput:
-    data: Any = None
-    token_len: int = -1
-    left_input: str = None
-    right_input: str = None
  
+class SemanticInput:
+    def __init__(self, data=None, token_len=-1, right_data=[]):
+        if type(data) is str:
+            data = get_data_prompt(data)
+        self.data = data
+        self.token_len = token_len
+        self.right_data = []
+        for i in range(len(right_data)):
+            self.right_data += right_data[i]
 
+    def add_right(self, value):
+        self.right_data += value
+        return self
+    
+    
 @dataclass
 class ExecutionState:
     raw_request: Any = None

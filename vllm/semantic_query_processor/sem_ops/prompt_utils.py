@@ -1,4 +1,5 @@
 from .base import OpName
+from vllm.semantic_query_processor.budget import KVMemoryManager
 
 
 SYSTEM_PROMPT = (
@@ -39,7 +40,7 @@ def _build_operation_prompt(instruction, op=OpName.SEM_FILTER):
             "The output must strictly follow the condition and contain no extra commentary.\n"
             f"Condition:{instruction}\n"
         )
-    if op in (OpName.SEM_CLASSIFY, OpName.LEGACY_SEM_GROUPBY):
+    if op in (OpName.SEM_CLASSIFY):
         return (
             "You are presented with a context and a classification instruction.\n"
             "Classify the context into exactly one of the provided groups.\n"
@@ -51,21 +52,35 @@ def _build_operation_prompt(instruction, op=OpName.SEM_FILTER):
     raise ValueError(f"Unsupported semantic operation: {op}")
 
 
-def get_data_prompt(data, data2=None):
+def get_system_prompt():
     messages = [{"role": "system", "type": "text", "content": SYSTEM_PROMPT}]
+    return messages
 
-    if data2 is not None:
+
+def get_data_prompt(data, right_data=None):    
+
+    if right_data:
         context = (
-            "CONTEXT_A:\n"
+            "CONTEXT:\n"
             "  {\n"
             f"    \"text\": {data}\n"
             "  }\n"
-            "\n\n"
-            "CONTEXT_B:\n"
-            "  {\n"
-            f"    \"text\": {data2}\n"
-            "  }\n"
         )
+        for idx, item in enumerate(right_data):
+            context += (
+                "\n\n"
+                f"CONTEXT:\n"
+                "  {\n"
+                f"    \"text\": {item}\n"
+                "  }\n"
+            )
+            # context += (
+            #     "\n\n"
+            #     f"CONTEXT_{chr(ord('B') + idx)}:\n"
+            #     "  {\n"
+            #     f"    \"text\": {item}\n"
+            #     "  }\n"
+            # )
     else:
         context = (
             "CONTEXT:\n"
@@ -74,12 +89,11 @@ def get_data_prompt(data, data2=None):
             "  }\n"
         )
 
-    messages.append({"role": "user", "type": "text", "content": context})
-    return messages
+    return [{"role": "user", "type": "text", "content": context}]
 
 
 def get_task_prompt(instruction, op=OpName.SEM_FILTER):
-    operation = _build_operation_prompt(instruction, op=op)
+    operation = _build_operation_prompt(instruction, op=op) 
     return [
         {
             "role": "user",
@@ -93,8 +107,16 @@ def get_task_prompt(instruction, op=OpName.SEM_FILTER):
     ]
 
 
-def get_prompt(instruction, data, data2=None, op=OpName.SEM_FILTER):
-    return get_data_prompt(data=data, data2=data2) + get_task_prompt(
-        instruction=instruction,
-        op=op,
-    )
+def get_prompt(instruction, data, op=OpName.SEM_FILTER):
+    if 'system' in data[0]['role']:
+        return data + get_task_prompt(instruction=instruction, op=op)
+    return get_system_prompt() + data + get_task_prompt(instruction=instruction, op=op)
+
+
+def add_assistant_prompt(prompt, output_text):
+    output_template = [{
+        "role": "assistant",
+        "content": output_text
+    }]
+    appended_prompt = prompt + output_template
+    return appended_prompt, KVMemoryManager.get_instance().apply_chat_template(appended_prompt)

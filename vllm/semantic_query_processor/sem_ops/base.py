@@ -6,7 +6,6 @@ class OpName:
     SEM_FILTER = "sem_filter"
     SEM_JOIN = "sem_join"
     SEM_CLASSIFY = "sem_classify"
-    LEGACY_SEM_GROUPBY = "sem_groupby"
     SEM_TOPK = "sem_topk"
     SEM_MAP = "sem_map"
     SEM_AGG = "sem_agg"
@@ -17,7 +16,6 @@ OPERATOR_LIST = [
     OpName.SEM_FILTER,
     OpName.SEM_JOIN,
     OpName.SEM_CLASSIFY,
-    OpName.LEGACY_SEM_GROUPBY,
     OpName.SEM_TOPK,
     OpName.SEM_MAP,
     OpName.SEM_AGG,

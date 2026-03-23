@@ -1,11 +1,9 @@
 from pathlib import Path
-import csv
-import json
-from pathlib import Path
-from vllm.semantic_query_processor.query import Query
-from vllm.semantic_query_processor.data import data
+import csv 
+from pathlib import Path 
 from vllm.semantic_query_processor.context import SemContext, SemanticInput, ExecutionState
 from vllm.semantic_query_processor.budget import KVMemoryManager
+from vllm.semantic_query_processor.sem_ops.prompt_utils import get_data_prompt
 
 
 # def _data_source(raw_request, query: Query, executor):
@@ -36,7 +34,7 @@ def _message_reader(raw_request, path: Path, executor):
 
     yield SemContext(
         input=SemanticInput(
-            data=text,
+            data=get_data_prompt(text),
             token_len=-1,
         ),
         state=ExecutionState(
@@ -55,7 +53,7 @@ def research_category_data():
         
         ctx = SemContext(
             input=SemanticInput(
-                data=category,
+                data=get_data_prompt(category),
                 token_len=-1,
             ),
             state=ExecutionState(

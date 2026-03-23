@@ -1,15 +1,17 @@
 import asyncio
 from vllm.semantic_query_processor.budget import KVMemoryManager
 from vllm.semantic_query_processor.sem_ops import OpKind, ops
-
+from collections import defaultdict
 class PlanExecutor:
 
     def __init__(self):
         self.pipeline_executor = AsyncPipelineExecutor()
         self.blocking_executor = BlockingExecutor()
 
+
     async def execute(self, ctxs, plan):
 
+        stage_stat_list = []
         for item in plan:
 
             # BLOCKING
@@ -18,12 +20,13 @@ class PlanExecutor:
                 
             # PIPELINE
             else:
-                ctxs = await self.pipeline_executor.execute_tasks(
+                ctxs, stage_stat = await self.pipeline_executor.execute_tasks(
                     ctxs,
                     item
                 )
+                stage_stat_list.append(stage_stat)
 
-        return ctxs
+        return ctxs, stage_stat_list
 
 
 class AsyncPipelineExecutor:
@@ -35,6 +38,7 @@ class AsyncPipelineExecutor:
         ctxs: initial contexts
         pipelines: [pipeline1, cp, pipeline2, ...]
         """
+        stage_stat = {}
  
         async def release_allocs(allocs): 
             for stage_id, budget in allocs:
@@ -62,7 +66,15 @@ class AsyncPipelineExecutor:
 
                     # normal pipeline stage
                     if not isinstance(stage, ops.CartesianProduct):
+                        if stage.stage_id in stage_stat:
+                            stage_stat[stage.stage_id]["input"] += 1
+                        else:
+                            stage_stat[stage.stage_id] = {"input": 1, "output": 0}
+
                         cur_ctx = await run_pipeline_stage(cur_ctx, stage, local_allocs)
+                        if not cur_ctx:
+                            return None  
+                        stage_stat[stage.stage_id]["output"] += 1
                         i += 1
                         continue
 
@@ -93,17 +105,20 @@ class AsyncPipelineExecutor:
 
         root_tasks = [asyncio.create_task(run_ctx(ctx, pipelines, inherited_allocs=[])) for ctx in ctxs]
         root_results = await asyncio.gather(*root_tasks, return_exceptions=False)
-
+    
         out = []
         for r in root_results:
-            if r is None:
-                continue
-            if isinstance(r, list):
-                out.extend(r)
-            else:
-                out.append(r)
+            child_results = [r]
+            while child_results:
+                item = child_results.pop()
+                if item is None:
+                    continue
+                if isinstance(item, list):
+                    child_results.extend(item)
+                else:
+                    out.append(item)
 
-        return out
+        return out, stage_stat
     
 
 

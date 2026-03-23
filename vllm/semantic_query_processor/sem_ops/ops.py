@@ -3,7 +3,7 @@ from vllm.semantic_query_processor.context import SemContext, SemanticInput, Exe
 from vllm.semantic_query_processor.budget import KVMemoryManager
 from vllm.semantic_query_processor.execution.pipeline_execution import BlockingExecutor
 from vllm.semantic_query_processor.controller.map_estimator import MapRatioEstimator
-from .prompt_utils import get_prompt, get_data_prompt
+from .prompt_utils import get_prompt, get_data_prompt, get_system_prompt, add_assistant_prompt
 from typing import List
 
 
@@ -11,45 +11,25 @@ class SemFilter(BaseOp):
 
     TRUE = 'true'
 
-    def __init__(self, instruction, pin=False, unpin=False, max_tokens=64):
-        super().__init__(kind=OpKind.TUPLE_INDEPENDENT)
+    def __init__(self, instruction, pin=False, unpin=False, max_tokens=64, position=-1):
+        super().__init__(kind=OpKind.TUPLE_INDEPENDENT, position=position)
         self.instruction = instruction
         self.pin = pin
         self.unpin = unpin
         self.max_tokens = max_tokens
 
-
-    def _build_data_prompt(self, ctx):
-        if ctx.input.data is not None:
-            return get_data_prompt(ctx.input.data)
-        return get_data_prompt(ctx.input.left_input, ctx.input.right_input)
-
-
-    def _build_full_prompt(self, ctx):
-        if ctx.input.data is not None:
-            return get_prompt(self.instruction, ctx.input.data, op=OpName.SEM_FILTER)
-        return get_prompt(
-            self.instruction,
-            ctx.input.left_input,
-            ctx.input.right_input,
-            op=OpName.SEM_JOIN,
-        )
-
-
     def _build_prompts(self, ctx):
-        data_prompt = self._build_data_prompt(ctx)
-        full_prompt = self._build_full_prompt(ctx)
+        if ctx.input.right_data:
+            ctx.input.data += ctx.input.right_data
+            ctx.input.right_data = []
+        data_prompt = get_system_prompt() + ctx.input.data if 'system' in ctx.input.data[0]['role'] else ctx.input.data
+        full_prompt = get_prompt(self.instruction, ctx.input.data, op=OpName.SEM_FILTER)
         return data_prompt, full_prompt
-
 
     def estimate_tokens(self, ctx):
         _, prompt = self._build_prompts(ctx)
             
-        prompt_str = KVMemoryManager.get_instance().tokenizer.apply_chat_template(
-            prompt,
-            tokenize=False,
-            add_generation_prompt=False,
-        )
+        prompt_str = KVMemoryManager.get_instance().apply_chat_template(prompt)
         prompt_token_len = KVMemoryManager.get_instance().token_length(prompt_str)
 
         return prompt_token_len + self.max_tokens
@@ -66,14 +46,17 @@ class SemFilter(BaseOp):
                 pin=self.pin,
         )
 
-        result = await ctx.state.executor.execute(
+        output = await ctx.state.executor.execute(
                 raw_request=ctx.state.raw_request,
                 prompt=prompt,
                 max_tokens=self.max_tokens,
                 pin=False,
         )
-        verdict = result.text.strip().lower()
 
+        # appended_prompt, appended_prompt_str = add_assistant_prompt(prompt, output.text)
+        verdict = output.text.strip().lower()
+        
+        ctx.input.data = prompt[:-1]
         if SemFilter.TRUE in verdict:
             passed = True
         else:
@@ -115,23 +98,16 @@ class SemMap(BaseOp):
         self.unpin = unpin
         self.instruction_token_len = KVMemoryManager.get_instance().token_length(self.instruction) + max_tokens
 
-
     def _build_prompt(self, ctx):
-        if ctx.input.data is None:
-            raise ValueError("SemMap requires ctx.input.data and does not support left/right inputs.")
         return get_prompt(self.instruction, ctx.input.data, op=OpName.SEM_MAP)
     
 
     def estimate_tokens(self, ctx):
         prompt = self._build_prompt(ctx)
-        prompt_str = KVMemoryManager.get_instance().tokenizer.apply_chat_template(
-            prompt,
-            tokenize=False,
-            add_generation_prompt=False,
-        )
+        prompt_str = KVMemoryManager.get_instance().apply_chat_template(prompt)
         prompt_token_len = KVMemoryManager.get_instance().token_length(prompt_str)
         ratio = MapRatioEstimator.instance().get_ratio(self.position)
-        self.max_tokens = int(ratio * prompt_str) if ratio else SemMap.MAX_TOKEN_LIMIT
+        self.max_tokens = int(ratio * len(prompt_str)) if ratio else SemMap.MAX_TOKEN_LIMIT
         return prompt_token_len + self.max_tokens
     
     
@@ -142,39 +118,28 @@ class SemMap(BaseOp):
 
         prompt = self._build_prompt(ctx)
 
-        
-        # For pinning generating tokens
-        # if ctx.state.pin_req_id and not self.unpin:
-        #     self.pin = True
-            
-        prompt_str = KVMemoryManager.get_instance().tokenizer.apply_chat_template(
-            prompt,
-            tokenize=False,
-            add_generation_prompt=False,
-        )
-        input_token_len = KVMemoryManager.get_instance().token_length(prompt_str)
-
         output = await executor.execute(
             raw_request=raw_request,
             prompt=prompt,
             max_tokens=self.max_tokens,
             pin=self.pin,
         )
-         
+        
         # resubmit if truncated
         if output.finish_reason == "length":
             if self.pin:
                 await executor.unpin(raw_request, output.request_id)
             output = await executor.execute(raw_request=raw_request, prompt=prompt, max_tokens=None, pin=self.pin,)
 
+        
+        prompt_str = KVMemoryManager.get_instance().apply_chat_template(prompt)
+        input_token_len = KVMemoryManager.get_instance().token_length(prompt_str)
+
+        appended_prompt, appended_prompt_str = add_assistant_prompt(prompt, output.text)
+        ctx.input.data = appended_prompt
         # Update ratio
-        MapRatioEstimator.instance().update(self.position, input_token_len, KVMemoryManager.get_instance().token_length(output.text))
-            
-        appended_text = f"{prompt_str}{output.text}"
-        ctx.input = SemanticInput(
-            data=appended_text,
-            token_len=KVMemoryManager.get_instance().token_length(appended_text),
-        )
+        MapRatioEstimator.instance().update(self.position, input_token_len, KVMemoryManager.get_instance().token_length(appended_prompt_str)-input_token_len)
+
         ctx.output.append({
             str(self.__class__): output.text
         })
@@ -197,11 +162,13 @@ class CartesianProduct(BaseOp):
         out = []
 
         for right in self.right_table:
+            base_input = SemanticInput(
+                data=ctx.input.data[:],
+                right_data=[]
+            )
+            _input = base_input.add_right(right.input.data)
             new_ctx = SemContext(
-                input=SemanticInput(
-                    left_input=ctx.input.data,
-                    right_input=right.input.data,
-                ),
+                input=_input,
                 state=ExecutionState(
                     raw_request=ctx.state.raw_request,
                     pin_req_id=None,
@@ -227,28 +194,16 @@ class SemClassify(BaseOp):
         self.instruction_token_len = KVMemoryManager.get_instance().token_length(self.instruction) + self.max_tokens + 1
 
 
-    def _build_data_prompt(self, ctx):
-        return get_data_prompt(ctx.input.data)
-
-
-    def _build_full_prompt(self, ctx):
-        return get_prompt(self.instruction, ctx.input.data, op=OpName.SEM_CLASSIFY)
-
-
     def _build_prompts(self, ctx):
-        data_prompt = self._build_data_prompt(ctx)
-        full_prompt = self._build_full_prompt(ctx)
+        data_prompt = get_system_prompt() + ctx.input.data if 'system' in ctx.input.data[0]['role'] else ctx.input.data
+        full_prompt = get_prompt(self.instruction, ctx.input.data, op=OpName.SEM_FILTER)
         return data_prompt, full_prompt
 
 
     def estimate_tokens(self, ctx):
         _, prompt = self._build_prompts(ctx)
             
-        prompt_str = KVMemoryManager.get_instance().tokenizer.apply_chat_template(
-            prompt,
-            tokenize=False,
-            add_generation_prompt=False,
-        )
+        prompt_str =KVMemoryManager.get_instance().apply_chat_template(prompt)
         prompt_token_len = KVMemoryManager.get_instance().token_length(prompt_str)
 
         return prompt_token_len + self.max_tokens
@@ -265,19 +220,20 @@ class SemClassify(BaseOp):
                 pin=self.pin,
         )
 
-        result = await ctx.state.executor.execute(
+        output = await ctx.state.executor.execute(
                 raw_request=ctx.state.raw_request,
                 prompt=prompt,
                 max_tokens=self.max_tokens,
                 pin=False,
         )
-        group_result = result.text.strip().lower()
+        group_output = output.text.strip().lower()
         group = ""
         for g in self.classes:
-            if g.lower() in group_result:
+            if g.lower() in group_output:
                 group = g
                 break 
 
+        ctx.input.data = prompt[:-1]
         ctx.output.append({
             str(self.__class__): str(group)
         })
@@ -294,7 +250,7 @@ class SemClassify(BaseOp):
 
 class SemAgg(BaseOp):
     def __init__(self, instruction: str, max_tokens: int = 8192, concurrency: int = 8, position=-1):
-        super().__init__(kind=OpKind.BLOCKING)
+        super().__init__(kind=OpKind.BLOCKING, position=position)
         self.instruction = instruction
         self.max_tokens = max_tokens
         self.concurrency = concurrency
@@ -420,8 +376,8 @@ class SemAgg(BaseOp):
 
 
 class SemTopK(BaseOp):
-    def __init__(self, instruction: str, k: int= 10, concurrency: int = 20):
-        super().__init__(kind=OpKind.BLOCKING)
+    def __init__(self, instruction: str, k: int= 10, concurrency: int = 20, position=-1):
+        super().__init__(kind=OpKind.BLOCKING, position=position)
         
         self.instruction = instruction
         self.k = k

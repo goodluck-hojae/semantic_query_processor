@@ -105,8 +105,12 @@ class KVMemoryManager:
             self._cond.notify_all()
 
 
-    def token_length(self, text: str) -> int:
-        return len(self.tokenizer.encode(text, add_special_tokens=False))
+    def token_length(self, text) -> int:
+        if type(text) is str:
+            return len(self.tokenizer.encode(text, add_special_tokens=False))
+        else:
+            prompt = self.tokenizer.apply_chat_template(text, tokenize=False, add_generation_prompt=False)
+            return len(self.tokenizer.encode(prompt, add_special_tokens=False))
 
     @classmethod
     def init(cls, model_name, kv_capacity, dtype=torch.float16):
@@ -120,3 +124,9 @@ class KVMemoryManager:
         if cls._instance is None:
             raise RuntimeError("KVMemoryManager not initialized")
         return cls._instance
+    
+    def apply_chat_template(self, prompt):
+        return self.tokenizer.apply_chat_template(prompt, tokenize=False, add_generation_prompt=False)
+    
+    def capacity(self):
+        return self._capacity
