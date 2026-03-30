@@ -208,6 +208,15 @@ class SemanticPlan:
                     )
                 )
 
+            elif name == OpName.SEM_TOPK:
+                physical.append(
+                    ops.SemTopK(
+                        instruction=args["instruction"],
+                        k=args["k"],
+                        position=idx
+                    )
+                )
+
             elif name == OpName.JOIN:
                 # Expand to CP + SemFilter
                 physical.append(

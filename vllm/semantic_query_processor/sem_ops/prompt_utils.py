@@ -32,6 +32,14 @@ def _build_operation_prompt(instruction, op=OpName.SEM_FILTER):
             "Do not include explanations or commentary.\n"
             f"Instruction:{instruction}\n"
         )
+    if op == OpName.SEM_TOPK:
+        return (
+            "You are presented with two contexts.\n"
+            "Compare the two contexts according to the ranking instruction.\n"
+            "Choose the better context.\n"
+            "Answer with 'A' or 'B' only.\n"
+            f"Instruction:{instruction}\n"
+        )
     if op == OpName.SEM_JOIN:
         return (
             "You are presented with two contexts.\n"
@@ -74,13 +82,6 @@ def get_data_prompt(data, right_data=None):
                 f"    \"text\": {item}\n"
                 "  }\n"
             )
-            # context += (
-            #     "\n\n"
-            #     f"CONTEXT_{chr(ord('B') + idx)}:\n"
-            #     "  {\n"
-            #     f"    \"text\": {item}\n"
-            #     "  }\n"
-            # )
     else:
         context = (
             "CONTEXT:\n"

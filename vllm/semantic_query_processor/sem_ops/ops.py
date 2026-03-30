@@ -3,7 +3,7 @@ from vllm.semantic_query_processor.context import SemContext, SemanticInput, Exe
 from vllm.semantic_query_processor.budget import KVMemoryManager
 from vllm.semantic_query_processor.execution.pipeline_execution import BlockingExecutor
 from vllm.semantic_query_processor.controller.map_estimator import MapRatioEstimator
-from .prompt_utils import get_prompt, get_data_prompt, get_system_prompt, add_assistant_prompt
+from .prompt_utils import get_prompt, get_system_prompt, add_assistant_prompt
 from typing import List
 
 
@@ -255,6 +255,25 @@ class SemAgg(BaseOp):
         self.max_tokens = max_tokens
         self.concurrency = concurrency
 
+    def _ctx_to_text(self, ctx: SemContext) -> str:
+        parts = []
+        for message in ctx.input.data:
+            role = message.get("role", "user")
+            content = message.get("content", "")
+            parts.append(f"{role.upper()}:\n{content}")
+        return "\n\n".join(parts)
+
+    def _build_prompt(self, chunk: List[SemContext]):
+        docs = []
+        for i, ctx in enumerate(chunk, 1):
+            docs.append(f"Document {i}:\n{self._ctx_to_text(ctx)}")
+        data = [{
+            "role": "user",
+            "type": "text",
+            "content": "\n\n".join(docs),
+        }]
+        return get_prompt(self.instruction, data, op=OpName.SEM_AGG)
+
 
     async def __call__(self, ctxs: List[SemContext]) -> List[SemContext]:
         working_set = list(ctxs)
@@ -290,32 +309,32 @@ class SemAgg(BaseOp):
 
 
     def _chunk_by_tokens(self, ctxs: List[SemContext]) -> List[List[SemContext]]:
-        chunks = []
-        cur = []
+        context_chunks = []
+        current_chunk = []
         instruction_overhead = KVMemoryManager.get_instance().token_length(
             "\n\n" + self.instruction + "\n\n"
         )
         per_doc_overhead = KVMemoryManager.get_instance().token_length(
             "\n\nDocument 1:\n"
         )
-        cur_tokens = instruction_overhead
+        current_chunk_tokens = instruction_overhead
 
         for ctx in ctxs:
-            t = ctx.input.token_len
-            item_tokens = t + per_doc_overhead
+            ctx_tokens = KVMemoryManager.get_instance().token_length(ctx.input.data)
+            chunk_item_tokens = ctx_tokens + per_doc_overhead
             # Allow an oversized single item as its own chunk instead of failing early.
-            if cur and cur_tokens + item_tokens > self.max_tokens:
-                chunks.append(cur)
-                cur = []
-                cur_tokens = instruction_overhead
+            if current_chunk and current_chunk_tokens + chunk_item_tokens > self.max_tokens:
+                context_chunks.append(current_chunk)
+                current_chunk = []
+                current_chunk_tokens = instruction_overhead
 
-            cur.append(ctx)
-            cur_tokens += item_tokens
+            current_chunk.append(ctx)
+            current_chunk_tokens += chunk_item_tokens
 
-        if cur:
-            chunks.append(cur)
+        if current_chunk:
+            context_chunks.append(current_chunk)
 
-        return chunks
+        return context_chunks
 
 
     def _build_reducer(self, chunk: List[SemContext]):
@@ -325,13 +344,9 @@ class SemAgg(BaseOp):
             def __init__(self, chunk: List[SemContext]):
                 self.chunk = chunk
 
-                prompt = ""
-                for i, ctx in enumerate(chunk, 1):
-                    prompt += f"\n\nDocument {i}:\n{ctx.input.data}"
-
-                prompt += "\n\n" + parent.instruction + "\n\n"
-
-                prompt_token_len = KVMemoryManager.get_instance().token_length(prompt)
+                prompt = parent._build_prompt(chunk)
+                prompt_str = KVMemoryManager.get_instance().apply_chat_template(prompt)
+                prompt_token_len = KVMemoryManager.get_instance().token_length(prompt_str)
 
                 self.budget = (prompt_token_len + parent.max_tokens) * KVMemoryManager.get_instance().bytes_per_token 
 
@@ -345,16 +360,9 @@ class SemAgg(BaseOp):
         executor = chunk[0].state.executor
         raw_request = chunk[0].state.raw_request
 
-        prompt = ""
-        total_tokens = 0
+        prompt = self._build_prompt(chunk)
 
-        for i, ctx in enumerate(chunk, 1):
-            prompt += f"\n\nDocument {i}:\n{ctx.input.data}"
-            total_tokens += ctx.input.token_len
-
-        prompt += "\n\n" + self.instruction + "\n\n"
-
-        result = await executor.complete(
+        result = await executor.execute(
             raw_request=raw_request,
             prompt=prompt,
             max_tokens=self.max_tokens,
@@ -384,6 +392,25 @@ class SemTopK(BaseOp):
         self.max_tokens = 5
         self.concurrency = concurrency
 
+    def _ctx_to_text(self, ctx: SemContext) -> str:
+        parts = []
+        for message in ctx.input.data:
+            role = message.get("role", "user")
+            content = message.get("content", "")
+            parts.append(f"{role.upper()}:\n{content}")
+        return "\n\n".join(parts)
+
+    def _build_compare_prompt(self, first: SemContext, second: SemContext):
+        data = [{
+            "role": "user",
+            "type": "text",
+            "content": (
+                f"Document A:\n{self._ctx_to_text(first)}\n\n"
+                f"Document B:\n{self._ctx_to_text(second)}"
+            ),
+        }]
+        return get_prompt(self.instruction, data, op=OpName.SEM_TOPK)
+
     async def __call__(self, ctxs: List[SemContext]) -> List[SemContext]:
         if len(ctxs) <= self.k:
             return await self._rank(ctxs)
@@ -409,26 +436,21 @@ class SemTopK(BaseOp):
 
     async def _partition(self, pivot: SemContext, others: List[SemContext]):
         executor = pivot.state.executor
+        parent = self
 
         def build_task(other: SemContext):
             raw_request = pivot.state.raw_request
-            instruction = self.instruction
             max_tokens = self.max_tokens
 
             class CompareTask:
                 def __init__(self):
-                    self.prompt = (
-                        f"Document A:\n{pivot.input.data}\n\n"
-                        f"Document B:\n{other.input.data}\n\n"
-                        f"{instruction}\n"
-                        f"Answer with 'A' or 'B'.\n\nAnswer:"
-                    )
+                    self.prompt = parent._build_compare_prompt(pivot, other)
                     tokens = KVMemoryManager.get_instance().token_length(self.prompt)
                     self.budget = tokens * KVMemoryManager.get_instance().bytes_per_token
 
 
                 async def __call__(self):
-                    result = await executor.complete(
+                    result = await executor.execute(
                         raw_request=raw_request,
                         prompt=self.prompt,
                         max_tokens=max_tokens,
@@ -477,14 +499,9 @@ class SemTopK(BaseOp):
     async def _compare(self, a: SemContext, b: SemContext) -> bool:
         executor = a.state.executor 
         raw_request = a.state.raw_request
-        prompt = (
-            f"Document A:\n{a.input.data}\n\n"
-            f"Document B:\n{b.input.data}\n\n"
-            f"{self.instruction}\n"
-            f"Answer with 'A' or 'B'.\n\nAnswer:"
-        )
+        prompt = self._build_compare_prompt(a, b)
 
-        result = await executor.complete(
+        result = await executor.execute(
             raw_request=raw_request,
             prompt=prompt,
             max_tokens=self.max_tokens,
