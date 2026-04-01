@@ -1,17 +1,10 @@
-from pathlib import Path
+import os
 import csv 
 from pathlib import Path 
 from vllm.semantic_query_processor.context import SemContext, SemanticInput, ExecutionState
 from vllm.semantic_query_processor.budget import KVMemoryManager
 from vllm.semantic_query_processor.sem_ops.prompt_utils import get_data_prompt
 
-
-# def _data_source(raw_request, query: Query, executor):
-#     path = Path(query.data_path)
-
-#     if path.suffix.lower() == ".csv":
-#         for ctx in _message_reader(raw_request, path, executor):
-#             yield ctx
 
 def _data_source(raw_request, data_path, executor):
     path = Path(data_path)
@@ -24,7 +17,7 @@ def _data_source(raw_request, data_path, executor):
         yield from _message_reader(raw_request, path, executor)
 
     elif path.suffix.lower() == ".csv":
-        for ctx in _message_reader(raw_request, path, executor):
+        for ctx in _csv_reader(raw_request, path, executor):
             yield ctx
 
 
@@ -44,6 +37,27 @@ def _message_reader(raw_request, path: Path, executor):
             idx=int(path.stem),
         ),
     )
+
+
+def _csv_reader(raw_request, path: Path, executor):
+    with path.open("r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+        for idx, row in enumerate(rows):
+            text = str(row["data"]).strip()
+            yield SemContext(
+                input=SemanticInput(
+                        data=text,
+                        token_len=KVMemoryManager.get_instance().token_length(text),
+                    ),
+                state=ExecutionState(
+                    raw_request=raw_request,
+                    pin_req_id=None,
+                    executor=executor,
+                    idx=idx,
+                )
+            )
+
 
 def research_category_data():
     
@@ -66,6 +80,7 @@ def research_category_data():
         out.append(ctx)
     return out
                 
+
 # def _message_reader(raw_request, path: Path, executor):
 #     with path.open("r", encoding="utf-8") as f:
 #         messages = json.load(f)
@@ -90,20 +105,3 @@ def research_category_data():
 #     )
 
 
-
-def _csv_reader(raw_request, path: Path, executor):
-    with path.open("r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        rows = list(reader)[:20]
-        for row in rows:
-            yield SemContext(
-                input=SemanticInput(
-                        data=str(row['Resume_str']).strip(),
-                        token_len=KVMemoryManager.get_instance().token_length(str(row['Resume_str']).strip()),
-                    ),
-                state=ExecutionState(
-                    raw_request=raw_request,
-                    pin_req_id=None,
-                    executor =executor
-                )
-            )

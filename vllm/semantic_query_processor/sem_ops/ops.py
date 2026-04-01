@@ -5,6 +5,7 @@ from vllm.semantic_query_processor.execution.pipeline_execution import BlockingE
 from vllm.semantic_query_processor.controller.map_estimator import MapRatioEstimator
 from .prompt_utils import get_prompt, get_system_prompt, add_assistant_prompt
 from typing import List
+from time import perf_counter
 
 
 class SemFilter(BaseOp):
@@ -22,7 +23,7 @@ class SemFilter(BaseOp):
         if ctx.input.right_data:
             ctx.input.data += ctx.input.right_data
             ctx.input.right_data = []
-        data_prompt = get_system_prompt() + ctx.input.data if 'system' in ctx.input.data[0]['role'] else ctx.input.data
+        data_prompt = ctx.input.data if 'system' in ctx.input.data[0]['role'] else get_system_prompt() + ctx.input.data
         full_prompt = get_prompt(self.instruction, ctx.input.data, op=OpName.SEM_FILTER)
         return data_prompt, full_prompt
 
@@ -39,19 +40,20 @@ class SemFilter(BaseOp):
         data_part, prompt = self._build_prompts(ctx)
 
         # Data part is only required to bin
-        data_result = await ctx.state.executor.execute(
-                raw_request=ctx.state.raw_request,
-                prompt=data_part,
-                max_tokens=1,
-                pin=self.pin,
-        )
-
+        # data_result = await ctx.state.executor.execute(
+        #         raw_request=ctx.state.raw_request,
+        #         prompt=data_part,
+        #         max_tokens=1,
+        #         pin=self.pin,
+        # )
         output = await ctx.state.executor.execute(
                 raw_request=ctx.state.raw_request,
                 prompt=prompt,
                 max_tokens=self.max_tokens,
-                pin=False,
+                pin=self.pin,
         )
+        if self.pin:
+            ctx.state.pin_req_id = output.request_id
 
         # appended_prompt, appended_prompt_str = add_assistant_prompt(prompt, output.text)
         verdict = output.text.strip().lower()
@@ -65,16 +67,11 @@ class SemFilter(BaseOp):
         ctx.output.append({
             str(self.__class__): verdict
         })
-        
-        if self.unpin and ctx.state.pin_req_id is not None:
+
+
+        if (self.unpin or not passed) and ctx.state.pin_req_id is not None:
             await ctx.state.executor.unpin(ctx.state.raw_request, ctx.state.pin_req_id)
             ctx.state.pin_req_id = None
-
-        if passed and self.pin:
-            ctx.state.pin_req_id = data_result.request_id
-        elif self.pin and data_result.request_id is not None:
-            # Data part was pinned for this request, release it if filter failed.
-            await ctx.state.executor.unpin(ctx.state.raw_request, data_result.request_id)
 
         return passed
     
@@ -107,7 +104,7 @@ class SemMap(BaseOp):
         prompt_str = KVMemoryManager.get_instance().apply_chat_template(prompt)
         prompt_token_len = KVMemoryManager.get_instance().token_length(prompt_str)
         ratio = MapRatioEstimator.instance().get_ratio(self.position)
-        self.max_tokens = int(ratio * len(prompt_str)) if ratio else SemMap.MAX_TOKEN_LIMIT
+        self.max_tokens = int(ratio * prompt_token_len) if ratio else SemMap.MAX_TOKEN_LIMIT
         return prompt_token_len + self.max_tokens
     
     
@@ -129,7 +126,10 @@ class SemMap(BaseOp):
         if output.finish_reason == "length":
             if self.pin:
                 await executor.unpin(raw_request, output.request_id)
+            retry_t0 = perf_counter()
             output = await executor.execute(raw_request=raw_request, prompt=prompt, max_tokens=None, pin=self.pin,)
+            retry_elapsed = perf_counter() - retry_t0
+            print(f"SemMap output retry took {retry_elapsed:.3f}s")
 
         
         prompt_str = KVMemoryManager.get_instance().apply_chat_template(prompt)
@@ -195,7 +195,7 @@ class SemClassify(BaseOp):
 
 
     def _build_prompts(self, ctx):
-        data_prompt = get_system_prompt() + ctx.input.data if 'system' in ctx.input.data[0]['role'] else ctx.input.data
+        data_prompt = ctx.input.data if 'system' in ctx.input.data[0]['role'] else get_system_prompt() + ctx.input.data
         full_prompt = get_prompt(self.instruction, ctx.input.data, op=OpName.SEM_FILTER)
         return data_prompt, full_prompt
 

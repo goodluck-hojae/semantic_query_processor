@@ -47,7 +47,18 @@ class AsyncPipelineExecutor:
         async def run_pipeline_stage(ctx, stage, local_allocs):
             
             pipeline = stage(ctx)
-            await self.manager.allocate_stage(pipeline.stage_id, pipeline.budget)
+            
+            while True: # Recompute the stage budget because SemMap updates its max-token ratio during execution.
+                pipeline.budget = pipeline.estimate_token_budget(ctx)
+
+                if await self.manager.can_admit_stage(pipeline.stage_id, pipeline.budget):
+                    await self.manager.allocate_stage(pipeline.stage_id, pipeline.budget)
+                    break
+
+                await self.manager.wait_for_stage_capacity()
+
+
+            # await self.manager.allocate_stage(pipeline.stage_id, pipeline.budget)
             local_allocs.append((pipeline.stage_id, pipeline.budget))
             result = await pipeline()
             return result

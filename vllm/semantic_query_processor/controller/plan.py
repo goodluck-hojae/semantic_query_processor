@@ -190,7 +190,6 @@ class SemanticPlan:
                         position=idx
                     )
                 )
-                MapRatioEstimator
 
             elif name in (OpName.SEM_CLASSIFY):
                 physical.append(
@@ -243,7 +242,7 @@ class SemanticPlan:
     
     async def warmup(self, ctxs, plan):
         #sample
-        out, stage_stat_list = await self.plan_executor.execute(ctxs[:int(len(ctxs)* 0.1)], plan)
+        out, stage_stat_list = await self.plan_executor.execute(ctxs, plan)
         kv_manager = KVMemoryManager.get_instance()
 
         _max_len = -1
@@ -257,7 +256,7 @@ class SemanticPlan:
             sum_allocation = 0
             a = 10
             for i, (s, inout) in enumerate(sorted_items):
-                ratio = inout['input'] / inout['output']
+                ratio = inout['input'] / inout['output'] if inout['output'] != 0 else inout['input']
 
                 if i == len(sorted_items) - 1:
                     allocation = kv_manager.capacity() - sum_allocation
@@ -265,21 +264,24 @@ class SemanticPlan:
                     allocation = (math.ceil(ratio) + a) * _max_len * kv_manager.bytes_per_token
                     sum_allocation += allocation
 
-                print(s, ratio)
-                kv_manager.register_stage(s, allocation)
-                    
-        pass
+                print(s, ratio, allocation/kv_manager.capacity())
+                kv_manager.register_stage(s, allocation/kv_manager.capacity())
+
+        return out
+
         
 
     async def execute(self, raw_request, query: Query):
         
         ctxs = list(data._data_source(raw_request, query.data_path, self.executor))
-        MapRatioEstimator.instance(int(len(ctxs) * 0.1))
+        MapRatioEstimator.instance()
         physical_ops = self.parse_ops(query.ops)
         plan = self.build(ctxs, physical_ops)
         self.print_plan(plan)
-                
-        out = await self.warmup(ctxs, plan)
-        out, _ = await self.plan_executor.execute(ctxs, plan)
+
+        split_idx = int(len(ctxs) * 0.2)
+        warmup_out = await self.warmup(ctxs[:split_idx], plan)
+        main_out, _ = await self.plan_executor.execute(ctxs[split_idx:], plan)
+        out = warmup_out + main_out
         MapRatioEstimator.instance().reset()
         return out 
