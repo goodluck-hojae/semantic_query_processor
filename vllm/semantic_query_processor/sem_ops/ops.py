@@ -11,22 +11,26 @@ from time import perf_counter
 class SemFilter(BaseOp):
 
     TRUE = 'true'
+    FALSE = 'false'
 
-    def __init__(self, instruction, pin=False, unpin=False, max_tokens=64, position=-1):
+    def __init__(self, instruction, negate=False, pin=False, unpin=False, max_tokens=8, position=-1):
         super().__init__(kind=OpKind.TUPLE_INDEPENDENT, position=position)
         self.instruction = instruction
+        self.negate = negate
         self.pin = pin
         self.unpin = unpin
         self.max_tokens = max_tokens
 
     def _build_prompts(self, ctx):
         if ctx.input.right_data:
-            ctx.input.data += ctx.input.right_data
-            ctx.input.right_data = []
-        data_prompt = ctx.input.data if 'system' in ctx.input.data[0]['role'] else get_system_prompt() + ctx.input.data
-        full_prompt = get_prompt(self.instruction, ctx.input.data, op=OpName.SEM_FILTER)
+            joined_data = ctx.input.data + ctx.input.right_data
+            data_prompt = joined_data if 'system' in joined_data[0]['role'] else get_system_prompt() + joined_data
+            full_prompt = get_prompt(self.instruction, joined_data, op=OpName.SEM_JOIN)
+        else:
+            data_prompt = ctx.input.data if 'system' in ctx.input.data[0]['role'] else get_system_prompt() + ctx.input.data
+            full_prompt = get_prompt(self.instruction, ctx.input.data, op=OpName.SEM_FILTER)
         return data_prompt, full_prompt
-
+    
     def estimate_tokens(self, ctx):
         _, prompt = self._build_prompts(ctx)
             
@@ -59,11 +63,23 @@ class SemFilter(BaseOp):
         verdict = output.text.strip().lower()
         
         ctx.input.data = prompt[:-1]
-        if SemFilter.TRUE in verdict:
-            passed = True
-        else:
-            passed = False
         
+        if bool(ctx.input.right_data):
+            ctx.input.right_data = []
+
+        if SemFilter.FALSE in verdict:
+            passed = False
+        else:
+            passed = True
+
+        # if SemFilter.TRUE in verdict:
+        #     passed = True
+        # else:
+        #     passed = False
+
+        if self.negate:
+            passed = not passed
+            
         ctx.output.append({
             str(self.__class__): verdict
         })
@@ -77,11 +93,11 @@ class SemFilter(BaseOp):
     
 
 class SemMap(BaseOp):
-    MAX_TOKEN_LIMIT = 8192
+    MAX_TOKEN_LIMIT = 4096
     def __init__(
         self,
         instruction,
-        max_tokens=8192,
+        max_tokens=MAX_TOKEN_LIMIT,
         expand=False,
         pin=False,
         unpin=False,
@@ -122,14 +138,26 @@ class SemMap(BaseOp):
             pin=self.pin,
         )
         
-        # resubmit if truncated
+        # resubmit if truncated with additional budget allocation
         if output.finish_reason == "length":
             if self.pin:
                 await executor.unpin(raw_request, output.request_id)
-            retry_t0 = perf_counter()
-            output = await executor.execute(raw_request=raw_request, prompt=prompt, max_tokens=None, pin=self.pin,)
-            retry_elapsed = perf_counter() - retry_t0
-            print(f"SemMap output retry took {retry_elapsed:.3f}s")
+            
+            # Request additional budget: only ask for tokens beyond original max_tokens allocation
+            additional_tokens = max(0, SemMap.MAX_TOKEN_LIMIT - self.max_tokens)
+            retry_budget = additional_tokens * KVMemoryManager.get_instance().bytes_per_token
+            if ctx.state.stage_id is not None:
+                await KVMemoryManager.get_instance().allocate_stage(ctx.state.stage_id, retry_budget)
+            
+            try:
+                retry_t0 = perf_counter()
+                output = await executor.execute(raw_request=raw_request, prompt=prompt, max_tokens=SemMap.MAX_TOKEN_LIMIT, pin=self.pin,)
+                retry_elapsed = perf_counter() - retry_t0
+                print(f"SemMap output retry took {retry_elapsed:.3f}s with max_tokens={SemMap.MAX_TOKEN_LIMIT} (additional_tokens={additional_tokens})")
+            finally:
+                # Release retry budget
+                if ctx.state.stage_id is not None:
+                    await KVMemoryManager.get_instance().release_stage(ctx.state.stage_id, retry_budget)
 
         
         prompt_str = KVMemoryManager.get_instance().apply_chat_template(prompt)

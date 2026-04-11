@@ -20,6 +20,8 @@ class VLLMExecutor(LLMExecutor):
             messages=message,
             max_tokens=max_tokens,
             temperature=0.0,
+            seed=42,
+            top_p=1.0,
             vllm_xargs={"pinned": pin},
         )
 
@@ -30,6 +32,8 @@ class VLLMExecutor(LLMExecutor):
             prompt=prompt,
             max_tokens=max_tokens,
             temperature=0.0,
+            seed=42,
+            top_p=1.0,
             vllm_xargs={"pinned": pin},
         )
 

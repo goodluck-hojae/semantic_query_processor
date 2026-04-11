@@ -49,6 +49,9 @@ class SemanticPipeline:
 
 
     async def __call__(self):
+        # Set stage_id on context for budget tracking during retries
+        self.ctx.state.stage_id = self.stage_id
+        
         next = True
         for idx, op in enumerate(self.ops):
             if next:

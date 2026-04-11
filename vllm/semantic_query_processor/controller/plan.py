@@ -254,7 +254,7 @@ class SemanticPlan:
             sorted_items = sorted(stages.items(), key=lambda x: float(x[0]))
 
             sum_allocation = 0
-            a = 10
+            a = 1
             for i, (s, inout) in enumerate(sorted_items):
                 ratio = inout['input'] / inout['output'] if inout['output'] != 0 else inout['input']
 
@@ -279,9 +279,10 @@ class SemanticPlan:
         plan = self.build(ctxs, physical_ops)
         self.print_plan(plan)
 
-        split_idx = int(len(ctxs) * 0.2)
+        split_idx = int(len(ctxs) * 0.1)
         warmup_out = await self.warmup(ctxs[:split_idx], plan)
         main_out, _ = await self.plan_executor.execute(ctxs[split_idx:], plan)
         out = warmup_out + main_out
         MapRatioEstimator.instance().reset()
+        print(f'len(out){len(out)}')
         return out 
