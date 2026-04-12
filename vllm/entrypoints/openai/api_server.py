@@ -584,20 +584,47 @@ async def semantic_query(
     sem_request: interface.SemanticQueryRequest,
     raw_request: Request,
 ):
+    started = asyncio.get_running_loop().time()
     print("=== Semantic Execute Request ===")
     print("Query:")
     print(sem_request.ops)
-    print("data_path:") 
+    print("data_path:")
+    print(sem_request.data_path)
     print("================================")
     _query = query.Query(sem_request.ops, sem_request.data_path)
     print('query called')
-    
+
     processor = raw_request.app.state.query_processor
-    await processor.execute(raw_request, _query)
-    
+    out_ctxs = await processor.execute(raw_request, _query)
+
+    results = []
+    for ctx in out_ctxs:
+        outputs = []
+        for item in ctx.output:
+            if isinstance(item, dict) and len(item) == 1:
+                op_name, value = next(iter(item.items()))
+                outputs.append({"op": op_name, "value": value})
+            else:
+                outputs.append({"op": "unknown", "value": item})
+
+        results.append(
+            {
+                "idx": getattr(ctx.state, "idx", None),
+                "input_context": getattr(ctx.input, "data", None),
+                "right_input_context": getattr(ctx.input, "right_data", None),
+                "outputs": outputs,
+            }
+        )
+
+    elapsed = asyncio.get_running_loop().time() - started
     return {
-        "predicate_result": 'yes',
-        "request_id": 'test',
+        "request_id": uuid.uuid4().hex,
+        "model_name": processor.model_name,
+        "data_path": sem_request.data_path,
+        "ops": sem_request.ops,
+        "num_output_rows": len(out_ctxs),
+        "latency_sec": round(elapsed, 3),
+        "results": results,
     }
 
 

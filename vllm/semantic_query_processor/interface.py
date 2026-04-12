@@ -1,8 +1,8 @@
 from pydantic import BaseModel
-from pathlib import Path
-import csv
+from typing import Any
 
 
 class SemanticQueryRequest(BaseModel):
-    ops: list
+    ops: list[dict[str, Any]]
     data_path: str
+    model_name: str | None = None

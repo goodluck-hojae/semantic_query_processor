@@ -33,9 +33,5 @@ class QueryProcessor:
 
  
     async def execute(self, raw_request, query: Query):
-        
-
         plan = SemanticPlan(self.executor)
-        await plan.execute(raw_request, query)
-
-        return "ctxs"
+        return await plan.execute(raw_request, query)
