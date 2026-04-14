@@ -11,6 +11,10 @@ from .executor import LLMExecutor, CompletionResult
 class VLLMExecutor(LLMExecutor):
 
     UNPIN_FUNCTION = 'unpin_request'
+
+    @staticmethod
+    def _owner_key(raw_request: Request) -> str:
+        return str(id(raw_request))
     
     def __init__(self, model: str):
         self.model = model
@@ -81,6 +85,7 @@ class VLLMExecutor(LLMExecutor):
                 request_id,
                 kind="chat",
                 max_tokens=max_tokens,
+                owner_key=self._owner_key(raw_request),
             )
 
         return CompletionResult(
@@ -114,6 +119,7 @@ class VLLMExecutor(LLMExecutor):
                 request_id,
                 kind="completion",
                 max_tokens=max_tokens,
+                owner_key=self._owner_key(raw_request),
             )
 
         return CompletionResult(

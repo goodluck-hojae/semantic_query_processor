@@ -321,6 +321,19 @@ class EngineCore:
         for request_id in request_ids:
             self.scheduler.kv_cache_manager.unpin_request(request_id)
 
+    def get_scheduler_state(self):
+        num_running_reqs, num_waiting_reqs = self.scheduler.get_request_counts()
+        kv_cache_usage = self.scheduler.kv_cache_manager.usage
+        return {
+            "running": num_running_reqs,
+            "waiting": num_waiting_reqs,
+            "kv_cache_usage": kv_cache_usage,
+            "is_stuck": (
+                num_waiting_reqs > 0
+                and kv_cache_usage == 1.0
+            ),
+        }
+
     def get_kv_cache_budget(self):
         return self.available_gpu_memory_for_kv_cache
     

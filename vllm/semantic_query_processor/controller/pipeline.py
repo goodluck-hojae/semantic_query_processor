@@ -55,7 +55,7 @@ class SemanticPipeline:
         next = True
         for idx, op in enumerate(self.ops):
             if next:
-                next = await op(self.ctx)
+                next = await op(self.ctx, priority=-idx)
 
                 if next is False:
                     return None

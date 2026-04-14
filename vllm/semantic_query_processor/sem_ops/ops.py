@@ -40,7 +40,7 @@ class SemFilter(BaseOp):
         return prompt_token_len + self.max_tokens
 
 
-    async def __call__(self, ctx: SemContext):
+    async def __call__(self, ctx: SemContext, priority: int = 0):
         data_part, prompt = self._build_prompts(ctx)
 
         # Data part is only required to bin
@@ -55,6 +55,7 @@ class SemFilter(BaseOp):
                 prompt=prompt,
                 max_tokens=self.max_tokens,
                 pin=self.pin,
+                priority=priority,
         )
         if self.pin:
             ctx.state.pin_req_id = output.request_id
@@ -120,11 +121,11 @@ class SemMap(BaseOp):
         prompt_str = KVMemoryManager.get_instance().apply_chat_template(prompt)
         prompt_token_len = KVMemoryManager.get_instance().token_length(prompt_str)
         ratio = MapRatioEstimator.instance().get_ratio(self.position)
-        self.max_tokens = int(ratio * prompt_token_len) if ratio else SemMap.MAX_TOKEN_LIMIT
+        self.max_tokens = int(ratio * prompt_token_len) if ratio else prompt_token_len #1 if we want to reproduce a deadlock
         return prompt_token_len + self.max_tokens
     
     
-    async def __call__(self, ctx: SemContext):
+    async def __call__(self, ctx: SemContext, priority: int = 0):
         
         executor = ctx.state.executor
         raw_request = ctx.state.raw_request  
@@ -136,12 +137,13 @@ class SemMap(BaseOp):
             prompt=prompt,
             max_tokens=self.max_tokens,
             pin=self.pin,
+            priority=priority,
         )
         
         # resubmit if truncated with additional budget allocation
         if output.finish_reason == "length":
-            if self.pin:
-                await executor.unpin(raw_request, output.request_id)
+            # if self.pin:
+            #     await executor.unpin(raw_request, output.request_id)
             
             # Request additional budget: only ask for tokens beyond original max_tokens allocation
             additional_tokens = max(0, SemMap.MAX_TOKEN_LIMIT - self.max_tokens)
@@ -151,7 +153,13 @@ class SemMap(BaseOp):
             
             try:
                 retry_t0 = perf_counter()
-                output = await executor.execute(raw_request=raw_request, prompt=prompt, max_tokens=SemMap.MAX_TOKEN_LIMIT, pin=self.pin,)
+                output = await executor.execute(
+                    raw_request=raw_request,
+                    prompt=prompt,
+                    max_tokens=SemMap.MAX_TOKEN_LIMIT,
+                    pin=self.pin,
+                    priority=priority-1,
+                )
                 retry_elapsed = perf_counter() - retry_t0
                 print(f"SemMap output retry took {retry_elapsed:.3f}s with max_tokens={SemMap.MAX_TOKEN_LIMIT} (additional_tokens={additional_tokens})")
             finally:
@@ -237,7 +245,7 @@ class SemClassify(BaseOp):
         return prompt_token_len + self.max_tokens
 
 
-    async def __call__(self, ctx: SemContext) -> SemContext: 
+    async def __call__(self, ctx: SemContext, priority: int = 0) -> SemContext: 
  
         data_part, prompt = self._build_prompts(ctx)
 
@@ -246,6 +254,7 @@ class SemClassify(BaseOp):
                 prompt=data_part,
                 max_tokens=1,
                 pin=self.pin,
+                priority=priority,
         )
 
         output = await ctx.state.executor.execute(
@@ -253,6 +262,7 @@ class SemClassify(BaseOp):
                 prompt=prompt,
                 max_tokens=self.max_tokens,
                 pin=False,
+                priority=priority,
         )
         group_output = output.text.strip().lower()
         group = ""

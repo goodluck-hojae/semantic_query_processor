@@ -84,6 +84,10 @@ class KVMemoryManager:
             self._stage_inflight[stage_id] += 1
 
     async def release_stage(self, stage_id: int, budget: int):
+        if KVMemoryManager.LOG:
+            used, cap = self.stage_usage(stage_id)
+            print("stage", stage_id, "inflight", self.stage_inflight(stage_id), "used", used, "cap", cap, "budget", budget)
+
         async with self._cond: 
             self._stage_used[stage_id] -= budget
             if self._stage_used[stage_id] < 0:

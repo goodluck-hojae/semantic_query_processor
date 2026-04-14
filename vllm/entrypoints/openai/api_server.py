@@ -600,6 +600,26 @@ async def get_pinned_requests(raw_request: Request):
     }
 
 
+@router.get("/v1/semantic/scheduler_state")
+async def get_scheduler_state(raw_request: Request):
+    try:
+        scheduler_state = await asyncio.wait_for(
+            raw_request.app.state.engine_client.engine_core.call_utility_async(
+                "get_scheduler_state"
+            ),
+            timeout=2.0,
+        )
+    except asyncio.TimeoutError:
+        return JSONResponse(
+            status_code=504,
+            content={
+                "error": "engine_unresponsive",
+            },
+        )
+
+    return scheduler_state
+
+
 @router.post("/v1/semantic/pinned/unpin")
 async def unpin_pinned_requests(
     payload: UnpinPinnedRequestsRequest,
@@ -1525,6 +1545,7 @@ async def init_app_state(
 
     # Query processor currently doesn't reflect other requests' budget usage
     state.query_processor = query_processor.QueryProcessor(model_name=model_name, budget=budget)
+    state.query_processor.start_stuck_monitor(state.engine_client)
     
 
 
