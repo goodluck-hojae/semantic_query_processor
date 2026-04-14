@@ -1,7 +1,6 @@
 import asyncio
 from vllm.semantic_query_processor.budget import KVMemoryManager
 from vllm.semantic_query_processor.sem_ops import OpKind, ops
-from collections import defaultdict
 class PlanExecutor:
 
     def __init__(self):
@@ -39,12 +38,8 @@ class AsyncPipelineExecutor:
         pipelines: [pipeline1, cp, pipeline2, ...]
         """
         stage_stat = {}
- 
-        async def release_allocs(allocs): 
-            for stage_id, budget in allocs:
-                await self.manager.release_stage(stage_id, budget)
 
-        async def run_pipeline_stage(ctx, stage, local_allocs):
+        async def run_pipeline_stage(ctx, stage):
             
             pipeline = stage(ctx)
             
@@ -58,48 +53,36 @@ class AsyncPipelineExecutor:
                 await self.manager.wait_for_stage_capacity()
 
 
-            # await self.manager.allocate_stage(pipeline.stage_id, pipeline.budget)
-            local_allocs.append((pipeline.stage_id, pipeline.budget))
-            result = await pipeline()
-            return result
-
-        async def run_ctx(ctx, remaining, inherited_allocs):
-            local_allocs = []
             try:
-                i = 0
-                cur_ctx = ctx
+                return await pipeline()
+            finally:
+                await self.manager.release_stage(
+                    pipeline.stage_id,
+                    pipeline.budget,
+                )
 
-                while True:
-                    if i >= len(remaining):
-                        return cur_ctx
+        async def run_ctx(ctx, remaining):
+            i = 0
+            cur_ctx = ctx
 
-                    stage = remaining[i]
+            while True:
+                if i >= len(remaining):
+                    return cur_ctx
 
-                    # normal pipeline stage
-                    if not isinstance(stage, ops.CartesianProduct):
-                        if stage.stage_id in stage_stat:
-                            stage_stat[stage.stage_id]["input"] += 1
-                        else:
-                            stage_stat[stage.stage_id] = {"input": 1, "output": 0}
+                stage = remaining[i]
 
-                        cur_ctx = await run_pipeline_stage(cur_ctx, stage, local_allocs)
-                        if not cur_ctx:
-                            return None  
-                        stage_stat[stage.stage_id]["output"] += 1
-                        i += 1
-                        continue
-
-                    # CartesianProduct: parent spawns children for the rest
+                if getattr(stage, "kind", None) == OpKind.JOIN:
                     new_ctxs = stage(cur_ctx)
                     rest = remaining[i + 1 :]
 
                     if not new_ctxs:
-                        return None  
-                    
-                    child_inherited_allocs = inherited_allocs + local_allocs
+                        return None
 
                     # Spawn children and wait for all, then parent can unpin its local_allocs
-                    child_tasks = [asyncio.create_task(run_ctx(c, rest, child_inherited_allocs)) for c in new_ctxs]
+                    child_tasks = [
+                        asyncio.create_task(run_ctx(c, rest))
+                        for c in new_ctxs
+                    ]
                     child_results = await asyncio.gather(*child_tasks, return_exceptions=False)
 
                     # Flatten results; filter out None
@@ -111,10 +94,18 @@ class AsyncPipelineExecutor:
                         
                     return out
 
-            finally:
-                await release_allocs(local_allocs)
+                if stage.stage_id in stage_stat:
+                    stage_stat[stage.stage_id]["input"] += 1
+                else:
+                    stage_stat[stage.stage_id] = {"input": 1, "output": 0}
 
-        root_tasks = [asyncio.create_task(run_ctx(ctx, pipelines, inherited_allocs=[])) for ctx in ctxs]
+                cur_ctx = await run_pipeline_stage(cur_ctx, stage)
+                if not cur_ctx:
+                    return None
+                stage_stat[stage.stage_id]["output"] += 1
+                i += 1
+
+        root_tasks = [asyncio.create_task(run_ctx(ctx, pipelines)) for ctx in ctxs]
         root_results = await asyncio.gather(*root_tasks, return_exceptions=False)
     
         out = []

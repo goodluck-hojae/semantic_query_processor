@@ -362,6 +362,34 @@ class KVCacheManager:
             for blk in group:
                 blk.pinned = False
         self.coordinator.free(request_id)
+
+    def get_pinned_requests(self) -> list[dict[str, int | str]]:
+        request_ids = set[str]()
+        for manager in self.coordinator.single_type_managers:
+            request_ids.update(manager.req_to_blocks.keys())
+
+        pinned_requests: list[dict[str, int | str]] = []
+        for request_id in sorted(request_ids):
+            blocks = self.coordinator.get_blocks(request_id)
+            total_blocks = 0
+            pinned_blocks = 0
+
+            for group in blocks:
+                for blk in group:
+                    if blk.is_null:
+                        continue
+                    total_blocks += 1
+                    if blk.pinned:
+                        pinned_blocks += 1
+
+            if pinned_blocks > 0:
+                pinned_requests.append({
+                    "request_id": request_id,
+                    "pinned_blocks": pinned_blocks,
+                    "total_blocks": total_blocks,
+                })
+
+        return pinned_requests
         
         
     def free(self, request: Request) -> None:

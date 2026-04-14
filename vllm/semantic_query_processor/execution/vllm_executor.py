@@ -3,6 +3,7 @@ import json
 from fastapi import Request
 from vllm.entrypoints.openai.protocol import CompletionRequest, ChatCompletionRequest
 from vllm.entrypoints.openai.api_server import create_completion, create_chat_completion
+from vllm.semantic_query_processor.pin_registry import PinnedRequestRegistry
 
 from .executor import LLMExecutor, CompletionResult
 
@@ -14,7 +15,7 @@ class VLLMExecutor(LLMExecutor):
     def __init__(self, model: str):
         self.model = model
 
-    def _build_chat_request(self, message, max_tokens, pin):
+    def _build_chat_request(self, message, max_tokens, pin, priority):
         return ChatCompletionRequest(
             model=self.model,
             messages=message,
@@ -22,11 +23,12 @@ class VLLMExecutor(LLMExecutor):
             temperature=0.0,
             seed=42,
             top_p=1.0,
+            priority=priority,
             vllm_xargs={"pinned": pin},
         )
 
 
-    def _build_request(self, prompt, max_tokens, pin):
+    def _build_request(self, prompt, max_tokens, pin, priority):
         return CompletionRequest(
             model=self.model,
             prompt=prompt,
@@ -34,6 +36,7 @@ class VLLMExecutor(LLMExecutor):
             temperature=0.0,
             seed=42,
             top_p=1.0,
+            priority=priority,
             vllm_xargs={"pinned": pin},
         )
 
@@ -43,6 +46,7 @@ class VLLMExecutor(LLMExecutor):
         prompt,
         max_tokens: int,
         pin: bool = False,
+        priority: int = 0
     ) -> CompletionResult:
         llm_func = self.complete if type(prompt) is str else self.chatcomplete
         return await llm_func(
@@ -50,6 +54,7 @@ class VLLMExecutor(LLMExecutor):
             prompt=prompt,
             max_tokens=max_tokens,
             pin=pin,
+            priority=priority,
         )
 
 
@@ -59,8 +64,9 @@ class VLLMExecutor(LLMExecutor):
         prompt,
         max_tokens: int,
         pin: bool = False,
+        priority: int = 0
     ) -> CompletionResult:
-        req = self._build_chat_request(prompt, max_tokens, pin)
+        req = self._build_chat_request(prompt, max_tokens, pin, priority)
 
         gen = await create_chat_completion(
             request=req,
@@ -69,10 +75,17 @@ class VLLMExecutor(LLMExecutor):
 
         raw = gen.body.decode("utf-8")
         data = json.loads(raw)
+        request_id = data["id"]
+        if pin:
+            PinnedRequestRegistry.instance().add(
+                request_id,
+                kind="chat",
+                max_tokens=max_tokens,
+            )
 
         return CompletionResult(
             text=data['choices'][0]['message']['content'],
-            request_id=data["id"],
+            request_id=request_id,
             finish_reason=data["choices"][0].get("finish_reason", "")
         )
 
@@ -84,8 +97,9 @@ class VLLMExecutor(LLMExecutor):
         prompt,
         max_tokens: int,
         pin: bool = False,
+        priority: int = 0
     ) -> CompletionResult:
-        req = self._build_request(prompt, max_tokens, pin)
+        req = self._build_request(prompt, max_tokens, pin, priority)
 
         gen = await create_completion(
             request=req,
@@ -94,10 +108,17 @@ class VLLMExecutor(LLMExecutor):
 
         raw = gen.body.decode("utf-8")
         data = json.loads(raw)
+        request_id = data["id"]
+        if pin:
+            PinnedRequestRegistry.instance().add(
+                request_id,
+                kind="completion",
+                max_tokens=max_tokens,
+            )
 
         return CompletionResult(
             text=data["choices"][0]["text"],
-            request_id=data["id"],
+            request_id=request_id,
             finish_reason=data["choices"][0].get("finish_reason", ""),
         )
 
@@ -107,6 +128,7 @@ class VLLMExecutor(LLMExecutor):
             VLLMExecutor.UNPIN_FUNCTION,
             request_id,
         )
+        PinnedRequestRegistry.instance().remove(request_id)
 
     async def abort(self, raw_request: Request, request_id: str):
         engine = raw_request.app.state.engine_client

@@ -314,6 +314,13 @@ class EngineCore:
         # self.scheduler.kv_cache_manager.unpin_request(request_id+'-0')
         self.scheduler.kv_cache_manager.unpin_request(request_id)
 
+    def get_pinned_requests(self):
+        return self.scheduler.kv_cache_manager.get_pinned_requests()
+
+    def unpin_requests(self, request_ids: list[str]):
+        for request_id in request_ids:
+            self.scheduler.kv_cache_manager.unpin_request(request_id)
+
     def get_kv_cache_budget(self):
         return self.available_gpu_memory_for_kv_cache
     

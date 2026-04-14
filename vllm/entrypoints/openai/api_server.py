@@ -568,6 +568,10 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
 
 
 
+class UnpinPinnedRequestsRequest(pydantic.BaseModel):
+    request_ids: list[str] | None = None
+
+
 @router.post("/v1/semantic/dummy")
 async def dummy(raw_request: Request):
     # Access engine
@@ -578,7 +582,75 @@ async def dummy(raw_request: Request):
     }
 
 
+@router.get("/v1/semantic/healthz")
+async def semantic_healthz(raw_request: Request):
+    return {
+        "status": "ok",
+        "component": "openai_api_server",
+        "query_processor_initialized": hasattr(raw_request.app.state, "query_processor"),
+    }
+
+
+@router.get("/v1/semantic/pinned")
+async def get_pinned_requests(raw_request: Request):
+    pinned_requests = PinnedRequestRegistry.instance().list()
+    return {
+        "count": len(pinned_requests),
+        "pinned_requests": pinned_requests,
+    }
+
+
+@router.post("/v1/semantic/pinned/unpin")
+async def unpin_pinned_requests(
+    payload: UnpinPinnedRequestsRequest,
+    raw_request: Request,
+):
+    current_pinned = PinnedRequestRegistry.instance().list()
+    current_ids = [item["request_id"] for item in current_pinned]
+    current_id_set = set(current_ids)
+
+    request_ids = payload.request_ids if payload.request_ids is not None else current_ids
+    request_ids = [request_id for request_id in request_ids if request_id in current_id_set]
+
+    if not request_ids:
+        return {
+            "unpinned_count": 0,
+            "unpinned_request_ids": [],
+            "remaining_pinned_requests": current_pinned,
+        }
+
+    try:
+        await asyncio.wait_for(
+            raw_request.app.state.engine_client.engine_core.call_utility_async(
+                "unpin_requests",
+                request_ids,
+            ),
+            timeout=2.0,
+        )
+    except asyncio.TimeoutError:
+        return JSONResponse(
+            status_code=504,
+            content={
+                "error": "engine_unresponsive",
+                "unpinned_count": 0,
+                "requested_request_ids": request_ids,
+                "remaining_pinned_requests": PinnedRequestRegistry.instance().list(),
+            },
+        )
+
+    for request_id in request_ids:
+        PinnedRequestRegistry.instance().remove(request_id)
+    remaining_pinned = PinnedRequestRegistry.instance().list()
+
+    return {
+        "unpinned_count": len(request_ids),
+        "unpinned_request_ids": request_ids,
+        "remaining_pinned_requests": remaining_pinned,
+    }
+
+
 from vllm.semantic_query_processor import query_processor, query, interface
+from vllm.semantic_query_processor.pin_registry import PinnedRequestRegistry
 @router.post("/v1/semantic/query")
 async def semantic_query(
     sem_request: interface.SemanticQueryRequest,
