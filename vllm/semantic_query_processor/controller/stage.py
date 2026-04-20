@@ -25,11 +25,13 @@ class Stage:
         operators,
         kind: OpKind | None = None,
         fanout_op=None,
+        priority_offset: int = 0,
     ):
         self.stage_id = stage_id
         self.operators = tuple(operators)
         self.kind = kind or self._infer_kind()
         self.fanout_op = fanout_op
+        self.priority_offset = priority_offset
         self.waiting_tasks = deque()
         self.running_tasks = {}
         self.bytes_per_token = KVMemoryManager.get_instance().bytes_per_token
@@ -130,12 +132,19 @@ class Stage:
         keep_going = True
         for idx, op in enumerate(self.operators):
             if keep_going:
-                keep_going = await op(task.ctx, priority=-idx)
+                keep_going = await op(
+                    task.ctx,
+                    priority=-(self.priority_offset + idx),
+                )
                 if keep_going is False:
                     return None
 
         return task.ctx
 
 
-def stage_builder(operators, stage_id):
-    return Stage(stage_id=stage_id, operators=operators)
+def stage_builder(operators, stage_id, priority_offset: int = 0):
+    return Stage(
+        stage_id=stage_id,
+        operators=operators,
+        priority_offset=priority_offset,
+    )

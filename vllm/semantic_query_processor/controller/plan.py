@@ -21,21 +21,24 @@ class SemanticPlan:
         current_segment = []          # [stage, stage, ...]
         stage_ops_chain = []          # tuple-independent ops to fuse
         next_stage_id = 1
+        next_priority_offset = 0
 
         def emit_stage():
-            nonlocal stage_ops_chain, current_segment, next_stage_id
+            nonlocal stage_ops_chain, current_segment, next_stage_id, next_priority_offset
 
             if not stage_ops_chain:
                 return
 
             current_stage = stage_builder(
                 tuple(stage_ops_chain),
-                next_stage_id
+                next_stage_id,
+                priority_offset=next_priority_offset,
             )
 
             current_segment.append(current_stage)
 
             next_stage_id += 1
+            next_priority_offset += len(stage_ops_chain)
             stage_ops_chain = []
 
         def flush_segment():
@@ -62,7 +65,7 @@ class SemanticPlan:
                     for ctx in estimated_ctxs
                 ]
                 if budgets:
-                    stage_min_caps[stage.stage_id] = max(budgets)
+                    stage_min_caps[stage.stage_id] = max(budgets) * 2
                 else:
                     stage_min_caps[stage.stage_id] = kv.bytes_per_token
 
