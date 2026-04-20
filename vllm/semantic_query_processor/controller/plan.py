@@ -4,8 +4,7 @@ from vllm.semantic_query_processor.data import data
 from vllm.semantic_query_processor.budget import KVMemoryManager
 from vllm.semantic_query_processor.execution.pipeline_execution import PlanExecutor
 from vllm.semantic_query_processor.controller.map_estimator import MapRatioEstimator
-from .pipeline import pipeline_builder, is_pipeline_builder
-import math
+from .stage import Stage, Task, stage_builder
 
 class SemanticPlan:
 
@@ -19,25 +18,25 @@ class SemanticPlan:
 
         plan = []
 
-        current_segment = []          # [pipeline_stage, cp, pipeline_stage, ...]
-        pipeline_ops_chain = []       # tuple-independent ops to fuse
+        current_segment = []          # [stage, stage, ...]
+        stage_ops_chain = []          # tuple-independent ops to fuse
         next_stage_id = 1
 
-        def emit_pipeline():
-            nonlocal pipeline_ops_chain, current_segment, next_stage_id
+        def emit_stage():
+            nonlocal stage_ops_chain, current_segment, next_stage_id
 
-            if not pipeline_ops_chain:
+            if not stage_ops_chain:
                 return
 
-            pipeline_stage = pipeline_builder(
-                tuple(pipeline_ops_chain),
+            current_stage = stage_builder(
+                tuple(stage_ops_chain),
                 next_stage_id
             )
 
-            current_segment.append(pipeline_stage)
+            current_segment.append(current_stage)
 
             next_stage_id += 1
-            pipeline_ops_chain = []
+            stage_ops_chain = []
 
         def flush_segment():
             nonlocal current_segment
@@ -54,16 +53,47 @@ class SemanticPlan:
 
             kv = KVMemoryManager.get_instance()
             num_stages = len(stage_ids)
+            stage_min_caps = {}
+            estimated_ctxs = list(ctxs)
+
+            for stage in current_segment:
+                budgets = [
+                    stage.estimate_budget(Task(ctx=ctx, stage_index=0))
+                    for ctx in estimated_ctxs
+                ]
+                if budgets:
+                    stage_min_caps[stage.stage_id] = max(budgets)
+                else:
+                    stage_min_caps[stage.stage_id] = kv.bytes_per_token
+
+                if stage.fanout_op is not None:
+                    next_ctxs = []
+                    for ctx in estimated_ctxs:
+                        next_ctxs.extend(stage.fanout_op(ctx) or [])
+                    estimated_ctxs = next_ctxs
 
             if num_stages == 1:
-                kv.register_stage(stage_ids[0], 1.0)
+                kv.register_stage(
+                    stage_ids[0],
+                    1.0,
+                    min_fraction=1.0,
+                    max_fraction=1.0,
+                )
 
             
             # initially allocate resource equally
             # And warm up for allocation
             elif num_stages > 1:
+                initial_fraction = 1 / num_stages
+                elastic_slack = min(0.5, initial_fraction)
                 for sid in stage_ids[0:]:
-                    kv.register_stage(sid, 1 / num_stages)
+                    kv.register_stage(
+                        sid,
+                        initial_fraction,
+                        min_fraction=0.0,
+                        max_fraction=min(1.0, initial_fraction + elastic_slack),
+                        min_capacity_bytes=stage_min_caps[sid],
+                    )
 
             plan.append(current_segment)
             current_segment = []
@@ -71,14 +101,16 @@ class SemanticPlan:
         for op in operators:
 
             if op.kind == OpKind.TUPLE_INDEPENDENT:
-                pipeline_ops_chain.append(op)
+                stage_ops_chain.append(op)
                 continue
 
             # boundary encountered
-            emit_pipeline()
+            emit_stage()
 
             if op.kind == OpKind.JOIN:  # CP
-                current_segment.append(op)
+                if not current_segment:
+                    raise ValueError("JOIN must follow a real stage to fan out from.")
+                current_segment[-1].fanout_op = op
 
             elif op.kind == OpKind.BLOCKING:
                 flush_segment()
@@ -88,7 +120,7 @@ class SemanticPlan:
                 raise ValueError(f"Unknown op kind: {op.kind}")
 
         # tail flush
-        emit_pipeline()
+        emit_stage()
         flush_segment()
 
         return plan
@@ -101,14 +133,16 @@ class SemanticPlan:
             if isinstance(item, list):
                 print(f"[{i}] PIPELINE")
                 for j, stage in enumerate(item, start=1):
-                    if is_pipeline_builder(stage):
-                        op_names = [op.__class__.__name__ for op in stage.ops]
-                        print(
-                            f"  ({j}) PIPELINE stage_id={stage.stage_id} "
-                            f"ops={op_names}"
-                        )
-                    else:
-                        print(f"  ({j}) {stage.__class__.__name__}")
+                    op_names = [op.__class__.__name__ for op in stage.operators]
+                    fanout_name = (
+                        stage.fanout_op.__class__.__name__
+                        if stage.fanout_op is not None
+                        else None
+                    )
+                    print(
+                        f"  ({j}) STAGE stage_id={stage.stage_id} "
+                        f"kind={stage.kind.name} ops={op_names} fanout={fanout_name}"
+                    )
             else:
                 # Blocking op
                 print(f"[{i}] BLOCKING {item.__class__.__name__}")
@@ -241,33 +275,7 @@ class SemanticPlan:
 
     
     async def warmup(self, ctxs, plan):
-        #sample
-        out, stage_stat_list = await self.plan_executor.execute(ctxs, plan)
-        kv_manager = KVMemoryManager.get_instance()
-
-        _max_len = -1
-        for ctx in ctxs:
-            token_len = kv_manager.token_length(ctx.input.data)
-            _max_len = token_len if token_len > _max_len else _max_len
-
-        for stages in stage_stat_list:
-            sorted_items = sorted(stages.items(), key=lambda x: float(x[0]))
-
-            sum_allocation = 0
-            a = 1
-            for i, (s, inout) in enumerate(sorted_items):
-                ratio = inout['input'] / inout['output'] if inout['output'] != 0 else inout['input']
-
-                if i == len(sorted_items) - 1:
-                    allocation = kv_manager.capacity() - sum_allocation
-                else:
-                    allocation = (math.ceil(ratio) + a) * _max_len * kv_manager.bytes_per_token
-                    sum_allocation += allocation
-
-                print(s, ratio, allocation/kv_manager.capacity())
-                kv_manager.register_stage(s, allocation/kv_manager.capacity())
-
-        return out
+        return []
 
         
 
@@ -279,10 +287,7 @@ class SemanticPlan:
         plan = self.build(ctxs, physical_ops)
         self.print_plan(plan)
 
-        split_idx = int(len(ctxs) * 0.1)
-        warmup_out = await self.warmup(ctxs[:split_idx], plan)
-        main_out, _ = await self.plan_executor.execute(ctxs[split_idx:], plan)
-        out = warmup_out + main_out
+        out, _ = await self.plan_executor.execute(ctxs, plan)
         MapRatioEstimator.instance().reset()
         print(f'len(out){len(out)}')
         return out 

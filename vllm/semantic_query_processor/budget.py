@@ -39,6 +39,7 @@ def compute_bytes_per_token(
 
 
 class KVMemoryManager:
+    ONE_TUPLE_TOKENS = 8192
     _instance = None
     _init_lock = threading.Lock()
     LOG = False
@@ -48,18 +49,138 @@ class KVMemoryManager:
 
         self._capacity = kv_capacity 
         self._global_used = 0
+        self._free_stage_capacity = 0
 
         self._stage_capacity = {}
+        self._stage_min_capacity = {}
+        self._stage_max_capacity = {}
         self._stage_used = {}
         self._stage_inflight = {}
 
         self._cond = asyncio.Condition()
 
     # Stage API (Pipeline)
-    def register_stage(self, stage_id: int, fraction: float):
+    def register_stage(
+        self,
+        stage_id: int,
+        fraction: float,
+        min_fraction: float | None = None,
+        max_fraction: float | None = None,
+        min_capacity_bytes: int | None = None,
+    ):
+        min_fraction = fraction if min_fraction is None else min_fraction
+        max_fraction = fraction if max_fraction is None else max_fraction
         self._stage_capacity[stage_id] = self._capacity * fraction
+        min_cap = self._capacity * min_fraction
+        if min_capacity_bytes is not None:
+            min_cap = max(min_cap, min_capacity_bytes)
+        self._stage_min_capacity[stage_id] = min(min_cap, self._stage_capacity[stage_id])
+        self._stage_max_capacity[stage_id] = self._capacity * max_fraction
         self._stage_used[stage_id] = 0
         self._stage_inflight[stage_id] = 0
+
+    def _log_rebalance(self, event: str):
+        stage_states = []
+        for stage_id in sorted(self._stage_capacity):
+            stage_states.append(
+                "stage="
+                f"{stage_id} "
+                f"used={int(self._stage_used.get(stage_id, 0))} "
+                f"cap={int(self._stage_capacity.get(stage_id, 0))} "
+                f"min={int(self._stage_min_capacity.get(stage_id, 0))} "
+                f"max={int(self._stage_max_capacity.get(stage_id, 0))} "
+                f"inflight={int(self._stage_inflight.get(stage_id, 0))}"
+            )
+        print(
+            f"[rebalance] {event} | free_pool={int(self._free_stage_capacity)} | "
+            + " | ".join(stage_states)
+        )
+
+    async def rebalance_stage_capacity(
+        self,
+        receiver_id: int,
+        donor_hint: int | None = None,
+        quantum_fraction: float = 0.05,
+    ) -> bool:
+        quantum = max(1, int(self._capacity * quantum_fraction))
+
+        async with self._cond:
+            receiver_cap = self._stage_capacity.get(receiver_id, 0)
+            receiver_max = self._stage_max_capacity.get(receiver_id, receiver_cap)
+            if receiver_cap >= receiver_max:
+                return False
+
+            if self._free_stage_capacity > 0:
+                delta = min(
+                    quantum,
+                    self._free_stage_capacity,
+                    receiver_max - receiver_cap,
+                )
+                if delta > 0:
+                    self._free_stage_capacity -= delta
+                    self._stage_capacity[receiver_id] += delta
+                    self._log_rebalance(
+                        f"assign_free receiver={receiver_id} delta={int(delta)}"
+                    )
+                    self._cond.notify_all()
+                    return True
+
+            donor_ids = []
+            if donor_hint is not None and donor_hint != receiver_id:
+                donor_ids.append(donor_hint)
+            donor_ids.extend(
+                stage_id
+                for stage_id in self._stage_capacity
+                if stage_id not in donor_ids and stage_id != receiver_id
+            )
+
+            for donor_id in donor_ids:
+                donor_cap = self._stage_capacity.get(donor_id, 0)
+                donor_min = self._stage_min_capacity.get(donor_id, donor_cap)
+                borrowable = donor_cap - donor_min
+                if borrowable <= 0:
+                    continue
+
+                delta = min(
+                    quantum,
+                    borrowable,
+                    receiver_max - receiver_cap,
+                )
+                if delta <= 0:
+                    continue
+
+                self._stage_capacity[donor_id] -= delta
+                self._stage_capacity[receiver_id] += delta
+                self._log_rebalance(
+                    f"borrow receiver={receiver_id} donor={donor_id} delta={int(delta)}"
+                )
+                self._cond.notify_all()
+                return True
+
+            return False
+
+    async def return_stage_capacity(
+        self,
+        stage_id: int,
+        quantum_fraction: float = 0.05,
+    ) -> bool:
+        quantum = max(1, int(self._capacity * quantum_fraction))
+
+        async with self._cond:
+            cur_cap = self._stage_capacity.get(stage_id, 0)
+            min_cap = self._stage_min_capacity.get(stage_id, cur_cap)
+            releasable = cur_cap - min_cap
+            if releasable <= 0:
+                return False
+
+            delta = min(quantum, releasable)
+            self._stage_capacity[stage_id] -= delta
+            self._free_stage_capacity += delta
+            self._log_rebalance(
+                f"return stage={stage_id} delta={int(delta)}"
+            )
+            self._cond.notify_all()
+            return True
 
     async def can_admit_stage(self, stage_id: int, budget: int):
         async with self._cond:
@@ -80,6 +201,26 @@ class KVMemoryManager:
             ):
                 await self._cond.wait()
 
+            self._stage_used[stage_id] += budget
+            self._stage_inflight[stage_id] += 1
+
+    async def force_allocate_stage(self, stage_id: int, budget: int):
+        if KVMemoryManager.LOG:
+            used, cap = self.stage_usage(stage_id)
+            print(
+                "force stage",
+                stage_id,
+                "inflight",
+                self.stage_inflight(stage_id),
+                "used",
+                used,
+                "cap",
+                cap,
+                "budget",
+                budget,
+            )
+
+        async with self._cond:
             self._stage_used[stage_id] += budget
             self._stage_inflight[stage_id] += 1
 

@@ -121,7 +121,7 @@ class SemMap(BaseOp):
         prompt_str = KVMemoryManager.get_instance().apply_chat_template(prompt)
         prompt_token_len = KVMemoryManager.get_instance().token_length(prompt_str)
         ratio = MapRatioEstimator.instance().get_ratio(self.position)
-        self.max_tokens = int(ratio * prompt_token_len) if ratio else prompt_token_len #1 if we want to reproduce a deadlock
+        self.max_tokens = int(ratio * prompt_token_len) if ratio else 1# if we want to reproduce a deadlock
         return prompt_token_len + self.max_tokens
     
     
