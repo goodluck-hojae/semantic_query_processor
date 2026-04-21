@@ -32,22 +32,42 @@ class PlanExecutor:
 
 
 class JoinTracker:
-    def __init__(self, parent_ctx, pending_children: int):
+    def __init__(
+        self,
+        parent_ctx,
+        pending_children: int,
+        manager: KVMemoryManager | None = None,
+        stage_id: int | None = None,
+        reserved_budget: int = 0,
+    ):
         self.parent_ctx = parent_ctx
         self.pending_children = pending_children
+        self.manager = manager
+        self.stage_id = stage_id
+        self.reserved_budget = reserved_budget
         self.lock = asyncio.Lock()
 
     async def child_finished(self):
         async with self.lock:
             self.pending_children -= 1
-            should_unpin = self.pending_children == 0
+            should_finalize = self.pending_children == 0
 
-        if should_unpin and self.parent_ctx.state.pin_req_id is not None:
+        if not should_finalize:
+            return
+
+        if self.parent_ctx.state.pin_req_id is not None:
             await self.parent_ctx.state.executor.unpin(
                 self.parent_ctx.state.raw_request,
                 self.parent_ctx.state.pin_req_id,
             )
             self.parent_ctx.state.pin_req_id = None
+
+        if (
+            self.manager is not None
+            and self.stage_id is not None
+            and self.reserved_budget > 0
+        ):
+            await self.manager.release_stage(self.stage_id, self.reserved_budget)
 
 
 class AsyncPipelineExecutor:
@@ -72,7 +92,7 @@ class AsyncPipelineExecutor:
                 stage_states.append(
                     "stage="
                     f"{stage.stage_id} "
-                    f"used={used} cap={cap} "
+                    f"used={used:,} cap={cap:,} "
                     f"waiting={len(waiting_task_ids)} "
                     f"running={len(running_task_ids)}"
                 )
@@ -233,16 +253,22 @@ class AsyncPipelineExecutor:
 
             for future in done:
                 stage, task = active.pop(future)
+                budget = stage.detach_budget(task)
                 try:
                     result = future.result()
-                finally:
-                    await stage.release(task, self.manager)
+                except Exception:
+                    await stage.release_budget(budget, self.manager)
                     log_running_tasks(
                         f"finish task={task.task_id} stage={stage.stage_id}"
                     )
-                await rebalance_stage_capacity()
+                    raise
 
                 if result is None:
+                    await stage.release_budget(budget, self.manager)
+                    log_running_tasks(
+                        f"finish task={task.task_id} stage={stage.stage_id}"
+                    )
+                    await rebalance_stage_capacity()
                     await finalize_task(task)
                     continue
 
@@ -258,14 +284,39 @@ class AsyncPipelineExecutor:
                                 task.ctx.state.pin_req_id,
                             )
                             task.ctx.state.pin_req_id = None
+                        await stage.release_budget(budget, self.manager)
+                        log_running_tasks(
+                            f"finish task={task.task_id} stage={stage.stage_id}"
+                        )
+                        await rebalance_stage_capacity()
                         await finalize_task(task)
                         continue
 
+                    deferred_release = False
                     trackers = task.trackers
+                    reserved_budget = 0
                     if task.ctx.state.pin_req_id is not None:
-                        trackers = trackers + (
-                            JoinTracker(task.ctx, len(child_ctxs)),
+                        reserved_budget = min(
+                            budget,
+                            stage.estimate_pinned_budget(task),
                         )
+                        immediate_release = budget - reserved_budget
+                        if immediate_release > 0:
+                            await self.manager.release_stage(
+                                stage.stage_id,
+                                immediate_release,
+                                decrement_inflight=False,
+                            )
+                        trackers = trackers + (
+                            JoinTracker(
+                                task.ctx,
+                                len(child_ctxs),
+                                manager=self.manager,
+                                stage_id=stage.stage_id,
+                                reserved_budget=reserved_budget,
+                            ),
+                        )
+                        deferred_release = reserved_budget > 0
 
                     for child_ctx in child_ctxs:
                         child_task = Task(
@@ -278,6 +329,15 @@ class AsyncPipelineExecutor:
                             await finalize_task(child_task)
                         else:
                             stages[next_stage_index].enqueue(child_task)
+
+                    if not deferred_release:
+                        await stage.release_budget(budget, self.manager)
+
+                    log_running_tasks(
+                        f"finish task={task.task_id} stage={stage.stage_id} "
+                        f"deferred_release={deferred_release}"
+                    )
+                    await rebalance_stage_capacity()
                     continue
 
                 record_output(stage.stage_id, 1)
@@ -291,6 +351,12 @@ class AsyncPipelineExecutor:
                     await finalize_task(next_task)
                 else:
                     stages[next_stage_index].enqueue(next_task)
+
+                await stage.release_budget(budget, self.manager)
+                log_running_tasks(
+                    f"finish task={task.task_id} stage={stage.stage_id}"
+                )
+                await rebalance_stage_capacity()
 
         return out, stage_stat
 

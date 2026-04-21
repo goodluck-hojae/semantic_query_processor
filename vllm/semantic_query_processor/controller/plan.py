@@ -65,7 +65,7 @@ class SemanticPlan:
                     for ctx in estimated_ctxs
                 ]
                 if budgets:
-                    stage_min_caps[stage.stage_id] = max(budgets) * 2
+                    stage_min_caps[stage.stage_id] = max(budgets)
                 else:
                     stage_min_caps[stage.stage_id] = kv.bytes_per_token
 

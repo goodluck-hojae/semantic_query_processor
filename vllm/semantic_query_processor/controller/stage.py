@@ -95,6 +95,18 @@ class Stage:
 
         return max_boundary * self.bytes_per_token
 
+    def estimate_pinned_budget(self, task: Task) -> int:
+        for op in self.operators:
+            if isinstance(op, ops.CartesianProduct):
+                break
+
+            if getattr(op, "pin", False):
+                if not hasattr(op, "estimate_tokens"):
+                    raise AttributeError(f"{op} must define `estimate_tokens`")
+                return op.estimate_tokens(task.ctx) * self.bytes_per_token
+
+        return 0
+
     def memory_limit(self, manager=None) -> int:
         manager = manager or KVMemoryManager.get_instance()
         _, limit = manager.stage_usage(self.stage_id)
@@ -121,10 +133,16 @@ class Stage:
         self.running_tasks[task.task_id] = budget
         return budget
 
-    async def release(self, task: Task, manager=None) -> None:
+    def detach_budget(self, task: Task) -> int:
+        return self.running_tasks.pop(task.task_id, 0)
+
+    async def release_budget(self, budget: int, manager=None) -> None:
         manager = manager or KVMemoryManager.get_instance()
-        budget = self.running_tasks.pop(task.task_id, 0)
         await manager.release_stage(self.stage_id, budget)
+
+    async def release(self, task: Task, manager=None) -> None:
+        budget = self.detach_budget(task)
+        await self.release_budget(budget, manager)
 
     async def run_task(self, task: Task):
         task.ctx.state.stage_id = self.stage_id

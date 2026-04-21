@@ -49,7 +49,6 @@ class KVMemoryManager:
 
         self._capacity = kv_capacity 
         self._global_used = 0
-        self._free_stage_capacity = 0
 
         self._stage_capacity = {}
         self._stage_min_capacity = {}
@@ -85,16 +84,18 @@ class KVMemoryManager:
             stage_states.append(
                 "stage="
                 f"{stage_id} "
-                f"used={int(self._stage_used.get(stage_id, 0))} "
-                f"cap={int(self._stage_capacity.get(stage_id, 0))} "
-                f"min={int(self._stage_min_capacity.get(stage_id, 0))} "
-                f"max={int(self._stage_max_capacity.get(stage_id, 0))} "
+                f"used={int(self._stage_used.get(stage_id, 0)):,} "
+                f"cap={int(self._stage_capacity.get(stage_id, 0)):,} "
+                f"min={int(self._stage_min_capacity.get(stage_id, 0)):,} "
+                f"max={int(self._stage_max_capacity.get(stage_id, 0)):,} "
                 f"inflight={int(self._stage_inflight.get(stage_id, 0))}"
             )
-        print(
-            f"[rebalance] {event} | free_pool={int(self._free_stage_capacity)} | "
-            + " | ".join(stage_states)
-        )
+        print(f"[rebalance] {event} | " + " | ".join(stage_states))
+
+    def _last_stage_id(self) -> int | None:
+        if not self._stage_capacity:
+            return None
+        return max(self._stage_capacity)
 
     async def rebalance_stage_capacity(
         self,
@@ -110,21 +111,6 @@ class KVMemoryManager:
             if receiver_cap >= receiver_max:
                 return False
 
-            if self._free_stage_capacity > 0:
-                delta = min(
-                    quantum,
-                    self._free_stage_capacity,
-                    receiver_max - receiver_cap,
-                )
-                if delta > 0:
-                    self._free_stage_capacity -= delta
-                    self._stage_capacity[receiver_id] += delta
-                    self._log_rebalance(
-                        f"assign_free receiver={receiver_id} delta={int(delta)}"
-                    )
-                    self._cond.notify_all()
-                    return True
-
             donor_ids = []
             if donor_hint is not None and donor_hint != receiver_id:
                 donor_ids.append(donor_hint)
@@ -137,7 +123,9 @@ class KVMemoryManager:
             for donor_id in donor_ids:
                 donor_cap = self._stage_capacity.get(donor_id, 0)
                 donor_min = self._stage_min_capacity.get(donor_id, donor_cap)
-                borrowable = donor_cap - donor_min
+                donor_used = self._stage_used.get(donor_id, 0)
+                donor_floor = max(donor_min, donor_used)
+                borrowable = donor_cap - donor_floor
                 if borrowable <= 0:
                     continue
 
@@ -169,15 +157,28 @@ class KVMemoryManager:
         async with self._cond:
             cur_cap = self._stage_capacity.get(stage_id, 0)
             min_cap = self._stage_min_capacity.get(stage_id, cur_cap)
-            releasable = cur_cap - min_cap
+            cur_used = self._stage_used.get(stage_id, 0)
+            releasable = cur_cap - max(min_cap, cur_used)
             if releasable <= 0:
                 return False
 
-            delta = min(quantum, releasable)
+            receiver_id = self._last_stage_id()
+            if receiver_id is None or receiver_id == stage_id:
+                return False
+
+            receiver_cap = self._stage_capacity.get(receiver_id, 0)
+            receiver_max = self._stage_max_capacity.get(receiver_id, receiver_cap)
+            growable = receiver_max - receiver_cap
+            if growable <= 0:
+                return False
+
+            delta = min(quantum, releasable, growable)
+            if delta <= 0:
+                return False
             self._stage_capacity[stage_id] -= delta
-            self._free_stage_capacity += delta
+            self._stage_capacity[receiver_id] += delta
             self._log_rebalance(
-                f"return stage={stage_id} delta={int(delta)}"
+                f"return stage={stage_id} receiver={receiver_id} delta={int(delta)}"
             )
             self._cond.notify_all()
             return True
@@ -224,7 +225,13 @@ class KVMemoryManager:
             self._stage_used[stage_id] += budget
             self._stage_inflight[stage_id] += 1
 
-    async def release_stage(self, stage_id: int, budget: int):
+    async def release_stage(
+        self,
+        stage_id: int,
+        budget: int,
+        *,
+        decrement_inflight: bool = True,
+    ):
         if KVMemoryManager.LOG:
             used, cap = self.stage_usage(stage_id)
             print("stage", stage_id, "inflight", self.stage_inflight(stage_id), "used", used, "cap", cap, "budget", budget)
@@ -233,9 +240,10 @@ class KVMemoryManager:
             self._stage_used[stage_id] -= budget
             if self._stage_used[stage_id] < 0:
                 self._stage_used[stage_id] = 0
-            self._stage_inflight[stage_id] -= 1
-            if self._stage_inflight[stage_id] < 0:
-                self._stage_inflight[stage_id] = 0
+            if decrement_inflight:
+                self._stage_inflight[stage_id] -= 1
+                if self._stage_inflight[stage_id] < 0:
+                    self._stage_inflight[stage_id] = 0
 
             self._cond.notify_all()
 
