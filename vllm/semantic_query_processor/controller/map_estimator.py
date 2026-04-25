@@ -24,7 +24,7 @@ class MapRatioEstimator:
     def get_ratio(self, pos, percentile=95):
         if pos not in self.data:
             return None
-        return np.percentile(self.data[pos], percentile) + 0.1
+        return np.percentile(self.data[pos], percentile) * 1.1
     
     def reset(self):
         self.data.clear()

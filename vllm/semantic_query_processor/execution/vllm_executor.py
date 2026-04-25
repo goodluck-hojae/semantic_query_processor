@@ -11,6 +11,12 @@ from .executor import LLMExecutor, CompletionResult
 class VLLMExecutor(LLMExecutor):
 
     UNPIN_FUNCTION = 'unpin_request'
+    LOG = False
+
+    @classmethod
+    def _log(cls, message: str):
+        if cls.LOG:
+            print(message)
 
     @staticmethod
     def _owner_key(raw_request: Request) -> str:
@@ -71,15 +77,35 @@ class VLLMExecutor(LLMExecutor):
         priority: int = 0
     ) -> CompletionResult:
         req = self._build_chat_request(prompt, max_tokens, pin, priority)
+        prompt_items = len(prompt) if isinstance(prompt, list) else 1
+        self._log(
+            "[vllm-exec] "
+            f"submit kind=chat "
+            f"max_tokens={max_tokens} "
+            f"pin={pin} "
+            f"priority={priority} "
+            f"prompt_items={prompt_items}"
+        )
 
         gen = await create_chat_completion(
             request=req,
             raw_request=raw_request,
         )
+        self._log(
+            "[vllm-exec] "
+            f"returned kind=chat "
+            f"response_type={type(gen).__name__}"
+        )
 
         raw = gen.body.decode("utf-8")
         data = json.loads(raw)
         request_id = data["id"]
+        self._log(
+            "[vllm-exec] "
+            f"decoded kind=chat "
+            f"request_id={request_id} "
+            f"finish_reason={data['choices'][0].get('finish_reason', '')}"
+        )
         if pin:
             PinnedRequestRegistry.instance().add(
                 request_id,
@@ -105,15 +131,35 @@ class VLLMExecutor(LLMExecutor):
         priority: int = 0
     ) -> CompletionResult:
         req = self._build_request(prompt, max_tokens, pin, priority)
+        prompt_len = len(prompt) if isinstance(prompt, str) else 1
+        self._log(
+            "[vllm-exec] "
+            f"submit kind=completion "
+            f"max_tokens={max_tokens} "
+            f"pin={pin} "
+            f"priority={priority} "
+            f"prompt_len={prompt_len}"
+        )
 
         gen = await create_completion(
             request=req,
             raw_request=raw_request,
         )
+        self._log(
+            "[vllm-exec] "
+            f"returned kind=completion "
+            f"response_type={type(gen).__name__}"
+        )
 
         raw = gen.body.decode("utf-8")
         data = json.loads(raw)
         request_id = data["id"]
+        self._log(
+            "[vllm-exec] "
+            f"decoded kind=completion "
+            f"request_id={request_id} "
+            f"finish_reason={data['choices'][0].get('finish_reason', '')}"
+        )
         if pin:
             PinnedRequestRegistry.instance().add(
                 request_id,
@@ -130,10 +176,12 @@ class VLLMExecutor(LLMExecutor):
 
     async def unpin(self, raw_request: Request, request_id: str):
         engine = raw_request.app.state.engine_client
+        self._log(f"[vllm-exec] unpin submit request_id={request_id}")
         await engine.engine_core.call_utility_async(
             VLLMExecutor.UNPIN_FUNCTION,
             request_id,
         )
+        self._log(f"[vllm-exec] unpin done request_id={request_id}")
         PinnedRequestRegistry.instance().remove(request_id)
 
     async def abort(self, raw_request: Request, request_id: str):

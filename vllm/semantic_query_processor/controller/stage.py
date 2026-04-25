@@ -1,9 +1,9 @@
-from collections import deque
 from dataclasses import dataclass, field
 from itertools import count
 from typing import Any
 
 from vllm.semantic_query_processor.budget import KVMemoryManager
+from vllm.semantic_query_processor.context import RETRY_TASK, RetryTaskResult
 from vllm.semantic_query_processor.sem_ops import OpKind, ops
 
 
@@ -15,6 +15,9 @@ class Task:
     ctx: Any
     stage_index: int
     trackers: tuple = ()
+    op_index: int = 0
+    retry_priority: int | None = None
+    reserved_budget: int = 0
     task_id: int = field(default_factory=lambda: next(_TASK_IDS))
 
 
@@ -32,17 +35,35 @@ class Stage:
         self.kind = kind or self._infer_kind()
         self.fanout_op = fanout_op
         self.priority_offset = priority_offset
-        self.waiting_tasks = deque()
+        self.waiting_tasks = []
         self.running_tasks = {}
         self.bytes_per_token = KVMemoryManager.get_instance().bytes_per_token
-        self.low_watermark = 1
-        self.high_watermark = 4
+        self.low_threshold = 1
+        self.high_threshold = 4
 
     def _infer_kind(self) -> OpKind:
         return OpKind.TUPLE_INDEPENDENT
 
+    def task_priority(self, task: Task) -> int:
+        if task.retry_priority is not None:
+            return task.retry_priority
+        return -(self.priority_offset + task.op_index)
+
     def enqueue(self, task: Task) -> None:
-        self.waiting_tasks.append(task)
+        task_priority = self.task_priority(task)
+        insert_at = len(self.waiting_tasks)
+        for idx, queued_task in enumerate(self.waiting_tasks):
+            queued_priority = self.task_priority(queued_task)
+            if (
+                task_priority < queued_priority
+                or (
+                    task_priority == queued_priority
+                    and task.task_id < queued_task.task_id
+                )
+            ):
+                insert_at = idx
+                break
+        self.waiting_tasks.insert(insert_at, task)
 
     def clear_tasks(self) -> None:
         self.waiting_tasks.clear()
@@ -58,17 +79,20 @@ class Stage:
         return len(self.running_tasks)
 
     def is_starving(self) -> bool:
-        return self.ready_count() < self.low_watermark
+        return self.ready_count() < self.low_threshold
 
-    def is_backlogged(self) -> bool:
-        return self.ready_count() > self.high_watermark
+    def is_saturated(self) -> bool:
+        return self.ready_count() > self.high_threshold
 
-    def tune_watermarks(self):
+    def tune_thresholds(self):
         if self.ready_count() == 0:
-            self.low_watermark = max(1, self.low_watermark - 1)
-            self.high_watermark = max(self.low_watermark + 1, self.high_watermark - 1)
-        elif self.ready_count() > self.high_watermark:
-            self.high_watermark += 1
+            self.low_threshold = max(1, self.low_threshold - 1)
+            self.high_threshold = max(
+                self.low_threshold + 1,
+                self.high_threshold - 1,
+            )
+        elif self.ready_count() > self.high_threshold:
+            self.high_threshold += 1
 
     def peek_task(self) -> Task | None:
         if not self.waiting_tasks:
@@ -78,11 +102,11 @@ class Stage:
     def pop_task(self) -> Task | None:
         if not self.waiting_tasks:
             return None
-        return self.waiting_tasks.popleft()
+        return self.waiting_tasks.pop(0)
 
     def estimate_budget(self, task: Task) -> int:
         max_boundary = -1
-        for op in self.operators:
+        for op in self.operators[task.op_index:]:
             if isinstance(op, ops.CartesianProduct):
                 break
 
@@ -95,39 +119,47 @@ class Stage:
 
         return max_boundary * self.bytes_per_token
 
-    def estimate_pinned_budget(self, task: Task) -> int:
-        for op in self.operators:
-            if isinstance(op, ops.CartesianProduct):
-                break
+    # def memory_limit(self, manager=None) -> int:
+    #     manager = manager or KVMemoryManager.get_instance()
+    #     _, limit = manager.stage_usage(self.stage_id)
+    #     return limit
 
-            if getattr(op, "pin", False):
-                if not hasattr(op, "estimate_tokens"):
-                    raise AttributeError(f"{op} must define `estimate_tokens`")
-                return op.estimate_tokens(task.ctx) * self.bytes_per_token
+    # async def can_accept(self, task: Task, manager=None) -> bool:
+    #     manager = manager or KVMemoryManager.get_instance()
+    #     return await manager.can_admit_stage(
+    #         self.stage_id,
+    #         self.estimate_budget(task),
+    #     )
 
-        return 0
-
-    def memory_limit(self, manager=None) -> int:
+    async def try_accept(self, task: Task, manager=None) -> int | None:
         manager = manager or KVMemoryManager.get_instance()
-        _, limit = manager.stage_usage(self.stage_id)
-        return limit
+        if task.reserved_budget > 0:
+            budget = task.reserved_budget
+            task.reserved_budget = 0
+            self.running_tasks[task.task_id] = budget
+            return budget
 
-    async def can_accept(self, task: Task, manager=None) -> bool:
-        manager = manager or KVMemoryManager.get_instance()
-        return await manager.can_admit_stage(
-            self.stage_id,
-            self.estimate_budget(task),
-        )
-
-    async def accept(self, task: Task, manager=None) -> int:
-        manager = manager or KVMemoryManager.get_instance()
         budget = self.estimate_budget(task)
-        await manager.allocate_stage(self.stage_id, budget)
+        if not await manager.try_allocate_stage(self.stage_id, budget):
+            return None
         self.running_tasks[task.task_id] = budget
         return budget
 
+    # async def accept(self, task: Task, manager=None) -> int:
+    #     manager = manager or KVMemoryManager.get_instance()
+    #     budget = self.estimate_budget(task)
+    #     await manager.allocate_stage(self.stage_id, budget)
+    #     self.running_tasks[task.task_id] = budget
+    #     return budget
+
     async def force_accept(self, task: Task, manager=None) -> int:
         manager = manager or KVMemoryManager.get_instance()
+        if task.reserved_budget > 0:
+            budget = task.reserved_budget
+            task.reserved_budget = 0
+            self.running_tasks[task.task_id] = budget
+            return budget
+
         budget = self.estimate_budget(task)
         await manager.force_allocate_stage(self.stage_id, budget)
         self.running_tasks[task.task_id] = budget
@@ -140,20 +172,33 @@ class Stage:
         manager = manager or KVMemoryManager.get_instance()
         await manager.release_stage(self.stage_id, budget)
 
-    async def release(self, task: Task, manager=None) -> None:
-        budget = self.detach_budget(task)
-        await self.release_budget(budget, manager)
+    # async def release(self, task: Task, manager=None) -> None:
+    #     budget = self.detach_budget(task)
+    #     await self.release_budget(budget, manager)
 
     async def run_task(self, task: Task):
         task.ctx.state.stage_id = self.stage_id
 
         keep_going = True
-        for idx, op in enumerate(self.operators):
+        for idx in range(task.op_index, len(self.operators)):
+            op = self.operators[idx]
             if keep_going:
+                priority = (
+                    task.retry_priority
+                    if idx == task.op_index and task.retry_priority is not None
+                    else -(self.priority_offset + idx)
+                )
                 keep_going = await op(
                     task.ctx,
-                    priority=-(self.priority_offset + idx),
+                    priority=priority,
                 )
+                if keep_going is RETRY_TASK:
+                    return RetryTaskResult(
+                        ctx=task.ctx,
+                        op_index=idx,
+                        retain_budget=bool(task.ctx.state.pin_req_id is not None
+                        ),
+                    )
                 if keep_going is False:
                     return None
 

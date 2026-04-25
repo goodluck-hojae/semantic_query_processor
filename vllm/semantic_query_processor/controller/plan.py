@@ -84,18 +84,47 @@ class SemanticPlan:
                 )
 
             
-            # initially allocate resource equally
-            # And warm up for allocation
+            # Start early stages at their minimum admission budget and give the
+            # last stage the remaining capacity, since it is usually the
+            # bottleneck after fanout.
             elif num_stages > 1:
-                initial_fraction = 1 / num_stages
-                elastic_slack = min(0.5, initial_fraction)
-                for sid in stage_ids[0:]:
+                total_capacity = kv.capacity()
+                total_min_needed = sum(stage_min_caps[sid] for sid in stage_ids)
+
+                if total_min_needed >= total_capacity:
+                    assigned_caps = {
+                        sid: max(
+                            kv.bytes_per_token,
+                            int(total_capacity * stage_min_caps[sid] / total_min_needed),
+                        )
+                        for sid in stage_ids
+                    }
+                else:
+                    assigned_caps = {
+                        sid: stage_min_caps[sid]
+                        for sid in stage_ids[:-1]
+                    }
+                    assigned_caps[stage_ids[-1]] = total_capacity - sum(
+                        assigned_caps.values()
+                    )
+
+                for idx, sid in enumerate(stage_ids):
+                    assigned_cap = max(kv.bytes_per_token, assigned_caps[sid])
+                    protected_min_cap = max(
+                        kv.bytes_per_token,
+                        stage_min_caps[sid],
+                    )
+                    initial_fraction = min(1.0, assigned_cap / total_capacity)
+                    if idx == num_stages - 1:
+                        max_fraction = 1.0
+                    else:
+                        max_fraction = min(1.0, initial_fraction + 0.5)
                     kv.register_stage(
                         sid,
                         initial_fraction,
                         min_fraction=0.0,
-                        max_fraction=min(1.0, initial_fraction + elastic_slack),
-                        min_capacity_bytes=stage_min_caps[sid],
+                        max_fraction=max_fraction,
+                        min_capacity_bytes=protected_min_cap,
                     )
 
             plan.append(current_segment)
@@ -112,8 +141,10 @@ class SemanticPlan:
 
             if op.kind == OpKind.JOIN:  # CP
                 if not current_segment:
-                    raise ValueError("JOIN must follow a real stage to fan out from.")
-                current_segment[-1].fanout_op = op
+                    flush_segment()
+                    plan.append(op)
+                else:
+                    current_segment[-1].fanout_op = op
 
             elif op.kind == OpKind.BLOCKING:
                 flush_segment()
@@ -146,6 +177,8 @@ class SemanticPlan:
                         f"  ({j}) STAGE stage_id={stage.stage_id} "
                         f"kind={stage.kind.name} ops={op_names} fanout={fanout_name}"
                     )
+            elif isinstance(item, ops.BaseOp) and item.kind == OpKind.JOIN:
+                print(f"[{i}] JOIN {item.__class__.__name__}")
             else:
                 # Blocking op
                 print(f"[{i}] BLOCKING {item.__class__.__name__}")
@@ -254,13 +287,35 @@ class SemanticPlan:
                 )
 
             elif name == OpName.JOIN:
-                # Expand to CP + SemFilter
-                physical.append(
-                    ops.CartesianProduct(
-                        right_table=list(data._data_source(None, args["right_table"], None)),
-                        position=idx
-                    )
+                enable_icp = args.get("enable_icp")
+                right_table = list(
+                    data._data_source(None, args["right_table"], None)
                 )
+
+                if enable_icp is False:
+                    continue
+
+                if enable_icp is True:
+                    physical.append(
+                        ops.IndexedCartesianProduct(
+                            right_table=right_table,
+                            service_address=args.get(
+                                "icp_address",
+                                "127.0.0.1",
+                            ),
+                            service_port=args.get("icp_port", 8000),
+                            threshold=args.get("icp_threshold", 0.5),
+                            position=idx,
+                        )
+                    )
+                else:
+                    physical.append(
+                        ops.CartesianProduct(
+                            right_table=right_table,
+                            position=idx
+                        )
+                    )
+
                 physical.append(
                     ops.SemFilter(
                         instruction=args["instruction"],
@@ -278,7 +333,10 @@ class SemanticPlan:
 
     
     async def warmup(self, ctxs, plan):
-        return []
+        if not ctxs:
+            return []
+        out, _ = await self.plan_executor.execute(ctxs, plan)
+        return out
 
         
 
@@ -290,7 +348,13 @@ class SemanticPlan:
         plan = self.build(ctxs, physical_ops)
         self.print_plan(plan)
 
-        out, _ = await self.plan_executor.execute(ctxs, plan)
+        warmup_count = min(len(ctxs), max(0, len(ctxs) // 20))
+        warmup_out = []
+        if warmup_count > 0:
+            warmup_out = await self.warmup(ctxs[:warmup_count], plan)
+        print('warm up done')
+        main_out, _ = await self.plan_executor.execute(ctxs[warmup_count:], plan)
+        out = warmup_out + main_out
         MapRatioEstimator.instance().reset()
         print(f'len(out){len(out)}')
         return out 

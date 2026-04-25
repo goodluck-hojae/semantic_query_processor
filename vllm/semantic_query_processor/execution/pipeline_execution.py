@@ -1,6 +1,8 @@
 import asyncio
+import time
 
 from vllm.semantic_query_processor.budget import KVMemoryManager
+from vllm.semantic_query_processor.context import RetryTaskResult
 from vllm.semantic_query_processor.controller.stage import Task
 from vllm.semantic_query_processor.sem_ops import OpKind, ops
 
@@ -20,6 +22,12 @@ class PlanExecutor:
             if isinstance(item, ops.BaseOp) and item.kind == OpKind.BLOCKING:
                 ctxs = await item(ctxs)
 
+            elif isinstance(item, ops.BaseOp) and item.kind == OpKind.JOIN:
+                next_ctxs = []
+                for ctx in ctxs:
+                    next_ctxs.extend(item(ctx) or [])
+                ctxs = next_ctxs
+
             # STAGES
             else:
                 ctxs, stage_stat = await self.pipeline_executor.execute_tasks(
@@ -32,6 +40,8 @@ class PlanExecutor:
 
 
 class JoinTracker:
+    LOG_JOIN_TRACKER = False
+
     def __init__(
         self,
         parent_ctx,
@@ -39,18 +49,30 @@ class JoinTracker:
         manager: KVMemoryManager | None = None,
         stage_id: int | None = None,
         reserved_budget: int = 0,
+        on_release=None,
     ):
         self.parent_ctx = parent_ctx
         self.pending_children = pending_children
         self.manager = manager
         self.stage_id = stage_id
         self.reserved_budget = reserved_budget
+        self.on_release = on_release
         self.lock = asyncio.Lock()
 
     async def child_finished(self):
         async with self.lock:
             self.pending_children -= 1
+            remaining = self.pending_children
             should_finalize = self.pending_children == 0
+
+        if self.LOG_JOIN_TRACKER and self.stage_id is not None:
+            print(
+                "[join-tracker] "
+                f"stage={self.stage_id} "
+                f"parent_pin={self.parent_ctx.state.pin_req_id} "
+                f"remaining_children={remaining} "
+                f"reserved_budget={self.reserved_budget}"
+            )
 
         if not should_finalize:
             return
@@ -67,10 +89,23 @@ class JoinTracker:
             and self.stage_id is not None
             and self.reserved_budget > 0
         ):
+            if self.LOG_JOIN_TRACKER:
+                print(
+                    "[join-tracker] "
+                    f"release stage={self.stage_id} "
+                    f"parent_pin={self.parent_ctx.state.pin_req_id} "
+                    f"reserved_budget={self.reserved_budget}"
+                )
             await self.manager.release_stage(self.stage_id, self.reserved_budget)
+            if self.on_release is not None:
+                self.on_release(self.stage_id, self.reserved_budget)
 
 
 class AsyncPipelineExecutor:
+    LOG_SCHEDULER = True
+    LOG_SCHEDULER_INTERVAL_SEC = 1.0
+    LOG_RETRY_TRACE = True
+
     def __init__(self):
         self.manager = KVMemoryManager.get_instance()
 
@@ -82,8 +117,52 @@ class AsyncPipelineExecutor:
         stage_stat = {}
         out = []
         active = {}
+        last_scheduler_log_at = 0.0
+        deferred_parent_counts = {
+            stage.stage_id: 0
+            for stage in stages
+        }
+        deferred_parent_bytes = {
+            stage.stage_id: 0
+            for stage in stages
+        }
+        retry_counts = {
+            stage.stage_id: 0
+            for stage in stages
+        }
+        total_retries = 0
+
+        def add_deferred_parent(stage_id: int, reserved_budget: int) -> None:
+            deferred_parent_counts[stage_id] = (
+                deferred_parent_counts.get(stage_id, 0) + 1
+            )
+            deferred_parent_bytes[stage_id] = (
+                deferred_parent_bytes.get(stage_id, 0) + reserved_budget
+            )
+
+        def release_deferred_parent(stage_id: int, reserved_budget: int) -> None:
+            deferred_parent_counts[stage_id] = max(
+                0,
+                deferred_parent_counts.get(stage_id, 0) - 1,
+            )
+            deferred_parent_bytes[stage_id] = max(
+                0,
+                deferred_parent_bytes.get(stage_id, 0) - reserved_budget,
+            )
+
+        def record_retry(stage_id: int) -> None:
+            nonlocal total_retries
+            retry_counts[stage_id] = retry_counts.get(stage_id, 0) + 1
+            total_retries += 1
 
         def log_running_tasks(event: str):
+            nonlocal last_scheduler_log_at
+            if not self.LOG_SCHEDULER:
+                return
+            now = time.monotonic()
+            if now - last_scheduler_log_at < self.LOG_SCHEDULER_INTERVAL_SEC:
+                return
+            last_scheduler_log_at = now
             stage_states = []
             for stage in stages:
                 running_task_ids = sorted(stage.running_tasks.keys())
@@ -94,9 +173,15 @@ class AsyncPipelineExecutor:
                     f"{stage.stage_id} "
                     f"used={used:,} cap={cap:,} "
                     f"waiting={len(waiting_task_ids)} "
-                    f"running={len(running_task_ids)}"
+                    f"running={len(running_task_ids)} "
+                    f"retries={retry_counts.get(stage.stage_id, 0)} "
+                    f"deferred_parents={deferred_parent_counts.get(stage.stage_id, 0)} "
+                    f"deferred_reserved={deferred_parent_bytes.get(stage.stage_id, 0):,}"
                 )
-            print(f"[scheduler] {event} | " + " | ".join(stage_states))
+            print(
+                f"[scheduler] {event} total_retries={total_retries} | "
+                + " | ".join(stage_states)
+            )
 
         async def finalize_task(task: Task):
             for tracker in task.trackers:
@@ -120,23 +205,23 @@ class AsyncPipelineExecutor:
             changed = False
 
             for stage in stages:
-                stage.tune_watermarks()
+                stage.tune_thresholds()
 
             # Keep draining idle stages toward their floor so later stages
             # can absorb capacity when they are the bottleneck.
             for stage in stages:
                 if stage.ready_count() == 0 and stage.running_count() == 0:
-                    while await self.manager.return_stage_capacity(stage.stage_id):
+                    if await self.manager.return_stage_capacity(stage.stage_id):
                         changed = True
 
-            # Grow any stage with a real backlog. Prefer borrowing from the
+            # Grow any stage with a saturated queue. Prefer borrowing from the
             # immediate upstream stage first because that matches pipeline flow.
             for idx, stage in enumerate(stages):
-                if not stage.is_backlogged():
+                if not stage.is_saturated():
                     continue
 
                 donor_hint = stages[idx - 1].stage_id if idx > 0 else None
-                while await self.manager.rebalance_stage_capacity(
+                if await self.manager.rebalance_stage_capacity(
                     receiver_id=stage.stage_id,
                     donor_hint=donor_hint,
                 ):
@@ -147,12 +232,30 @@ class AsyncPipelineExecutor:
             for idx in range(1, len(stages)):
                 stage = stages[idx]
                 prev_stage = stages[idx - 1]
-                if stage.is_starving() and prev_stage.has_waiting_tasks():
-                    while await self.manager.rebalance_stage_capacity(
-                        receiver_id=prev_stage.stage_id,
-                        donor_hint=stage.stage_id,
-                    ):
-                        changed = True
+                downstream_light = (
+                    stage.running_count() <= 1
+                    and stage.ready_count() <= stage.low_threshold
+                )
+                if not (stage.is_starving() and downstream_light):
+                    continue
+
+                head_task = prev_stage.peek_task()
+                if head_task is None:
+                    continue
+
+                head_budget = prev_stage.estimate_budget(head_task)
+                used, cap = self.manager.stage_usage(prev_stage.stage_id)
+                needed = used + head_budget - cap
+                if needed <= 0:
+                    continue
+
+                while needed > 0 and await self.manager.rebalance_stage_capacity(
+                    receiver_id=prev_stage.stage_id,
+                    donor_hint=stage.stage_id,
+                ):
+                    changed = True
+                    used, cap = self.manager.stage_usage(prev_stage.stage_id)
+                    needed = used + head_budget - cap
 
             if changed:
                 log_running_tasks("rebalance")
@@ -189,12 +292,11 @@ class AsyncPipelineExecutor:
                     if task is None:
                         break
 
-                    if not await stage.can_accept(task, self.manager):
+                    if await stage.try_accept(task, self.manager) is None:
                         break
 
                     record_input(stage.stage_id)
                     stage.pop_task()
-                    await stage.accept(task, self.manager)
                     log_running_tasks(
                         f"start task={task.task_id} stage={stage.stage_id}"
                     )
@@ -263,6 +365,37 @@ class AsyncPipelineExecutor:
                     )
                     raise
 
+                if isinstance(result, RetryTaskResult):
+                    if self.LOG_RETRY_TRACE:
+                        print(
+                            "[scheduler-retry] "
+                            f"task={task.task_id} "
+                            f"stage={stage.stage_id} "
+                            f"op_index={result.op_index} "
+                            f"budget={budget} "
+                            f"retain_budget={result.retain_budget} "
+                            f"retry_max_tokens={result.ctx.state.retry_max_tokens} "
+                            f"pin_req_id={result.ctx.state.pin_req_id}"
+                        )
+                    retry_task = Task(
+                        ctx=result.ctx,
+                        stage_index=task.stage_index,
+                        trackers=task.trackers,
+                        op_index=result.op_index,
+                        retry_priority=-(stage.priority_offset + result.op_index),
+                        reserved_budget=budget if result.retain_budget else 0,
+                    )
+                    stages[task.stage_index].enqueue(retry_task)
+                    record_retry(stage.stage_id)
+                    if not result.retain_budget:
+                        await stage.release_budget(budget, self.manager)
+                    log_running_tasks(
+                        f"retry task={task.task_id} stage={stage.stage_id} "
+                        f"retain_budget={result.retain_budget}"
+                    )
+                    await rebalance_stage_capacity()
+                    continue
+
                 if result is None:
                     await stage.release_budget(budget, self.manager)
                     log_running_tasks(
@@ -294,29 +427,27 @@ class AsyncPipelineExecutor:
 
                     deferred_release = False
                     trackers = task.trackers
-                    reserved_budget = 0
                     if task.ctx.state.pin_req_id is not None:
-                        reserved_budget = min(
-                            budget,
-                            stage.estimate_pinned_budget(task),
+                        add_deferred_parent(stage.stage_id, budget)
+                        print(
+                            "[scheduler] "
+                            f"defer-release task={task.task_id} "
+                            f"stage={stage.stage_id} "
+                            f"children={len(child_ctxs)} "
+                            f"budget={budget} "
+                            f"pin_req_id={task.ctx.state.pin_req_id}"
                         )
-                        immediate_release = budget - reserved_budget
-                        if immediate_release > 0:
-                            await self.manager.release_stage(
-                                stage.stage_id,
-                                immediate_release,
-                                decrement_inflight=False,
-                            )
                         trackers = trackers + (
                             JoinTracker(
                                 task.ctx,
                                 len(child_ctxs),
                                 manager=self.manager,
                                 stage_id=stage.stage_id,
-                                reserved_budget=reserved_budget,
+                                reserved_budget=budget,
+                                on_release=release_deferred_parent,
                             ),
                         )
-                        deferred_release = reserved_budget > 0
+                        deferred_release = True
 
                     for child_ctx in child_ctxs:
                         child_task = Task(

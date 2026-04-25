@@ -190,6 +190,18 @@ class KVMemoryManager:
                 <= self._stage_capacity[stage_id]
             )
 
+    async def try_allocate_stage(self, stage_id: int, budget: int) -> bool:
+        async with self._cond:
+            if (
+                self._stage_used[stage_id] + budget
+                > self._stage_capacity[stage_id]
+            ):
+                return False
+
+            self._stage_used[stage_id] += budget
+            self._stage_inflight[stage_id] += 1
+            return True
+
     async def allocate_stage(self, stage_id: int, budget: int):
         if KVMemoryManager.LOG:
             used, cap = self.stage_usage(stage_id)
@@ -225,13 +237,7 @@ class KVMemoryManager:
             self._stage_used[stage_id] += budget
             self._stage_inflight[stage_id] += 1
 
-    async def release_stage(
-        self,
-        stage_id: int,
-        budget: int,
-        *,
-        decrement_inflight: bool = True,
-    ):
+    async def release_stage(self, stage_id: int, budget: int):
         if KVMemoryManager.LOG:
             used, cap = self.stage_usage(stage_id)
             print("stage", stage_id, "inflight", self.stage_inflight(stage_id), "used", used, "cap", cap, "budget", budget)
@@ -240,16 +246,15 @@ class KVMemoryManager:
             self._stage_used[stage_id] -= budget
             if self._stage_used[stage_id] < 0:
                 self._stage_used[stage_id] = 0
-            if decrement_inflight:
-                self._stage_inflight[stage_id] -= 1
-                if self._stage_inflight[stage_id] < 0:
-                    self._stage_inflight[stage_id] = 0
+            self._stage_inflight[stage_id] -= 1
+            if self._stage_inflight[stage_id] < 0:
+                self._stage_inflight[stage_id] = 0
 
             self._cond.notify_all()
 
-    async def wait_for_stage_capacity(self):
-        async with self._cond:
-            await self._cond.wait()
+    # async def wait_for_stage_capacity(self):
+    #     async with self._cond:
+    #         await self._cond.wait()
             
     def stage_inflight(self, stage_id: int) -> int:
         return self._stage_inflight.get(stage_id, 0)

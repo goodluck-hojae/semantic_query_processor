@@ -1,17 +1,23 @@
 from .base import BaseOp, OpKind, OpName
-from vllm.semantic_query_processor.context import SemContext, SemanticInput, ExecutionState
+from vllm.semantic_query_processor.context import (
+    RETRY_TASK,
+    ExecutionState,
+    SemContext,
+    SemanticInput,
+)
 from vllm.semantic_query_processor.budget import KVMemoryManager
 from vllm.semantic_query_processor.execution.pipeline_execution import BlockingExecutor
 from vllm.semantic_query_processor.controller.map_estimator import MapRatioEstimator
 from .prompt_utils import get_prompt, get_system_prompt, add_assistant_prompt
-from typing import List
-from time import perf_counter
+import requests
+from typing import Any, List
 
 
 class SemFilter(BaseOp):
 
     TRUE = 'true'
     FALSE = 'false'
+    LOG = False
 
     def __init__(self, instruction, negate=False, pin=False, unpin=False, max_tokens=8, position=-1):
         super().__init__(kind=OpKind.TUPLE_INDEPENDENT, position=position)
@@ -87,6 +93,13 @@ class SemFilter(BaseOp):
 
 
         if (self.unpin or not passed) and ctx.state.pin_req_id is not None:
+            if self.LOG:
+                print(
+                    "[sem-op] "
+                    f"SemFilter unpin pin_req_id={ctx.state.pin_req_id} "
+                    f"passed={passed} "
+                    f"self_unpin={self.unpin}"
+                )
             await ctx.state.executor.unpin(ctx.state.raw_request, ctx.state.pin_req_id)
             ctx.state.pin_req_id = None
 
@@ -95,6 +108,8 @@ class SemFilter(BaseOp):
 
 class SemMap(BaseOp):
     MAX_TOKEN_LIMIT = 4096
+    LOG = False
+    LOG_RETRY_TRACE = True
     def __init__(
         self,
         instruction,
@@ -112,6 +127,21 @@ class SemMap(BaseOp):
         self.unpin = unpin
         self.instruction_token_len = KVMemoryManager.get_instance().token_length(self.instruction) + max_tokens
 
+    def _planned_max_tokens(self, ctx, prompt_token_len=None) -> int:
+        if (
+            ctx.state.retry_op_position == self.position
+            and ctx.state.retry_max_tokens > 0
+        ):
+            return ctx.state.retry_max_tokens
+
+        if prompt_token_len is None:
+            prompt = self._build_prompt(ctx)
+            prompt_str = KVMemoryManager.get_instance().apply_chat_template(prompt)
+            prompt_token_len = KVMemoryManager.get_instance().token_length(prompt_str)
+
+        ratio = MapRatioEstimator.instance().get_ratio(self.position)
+        return int(ratio * prompt_token_len) if ratio else 1 #int(prompt_token_len)  #1
+
     def _build_prompt(self, ctx):
         return get_prompt(self.instruction, ctx.input.data, op=OpName.SEM_MAP)
     
@@ -120,56 +150,59 @@ class SemMap(BaseOp):
         prompt = self._build_prompt(ctx)
         prompt_str = KVMemoryManager.get_instance().apply_chat_template(prompt)
         prompt_token_len = KVMemoryManager.get_instance().token_length(prompt_str)
-        ratio = MapRatioEstimator.instance().get_ratio(self.position)
-        self.max_tokens = int(ratio * prompt_token_len) if ratio else 1# if we want to reproduce a deadlock
+        self.max_tokens = self._planned_max_tokens(ctx, prompt_token_len)
         return prompt_token_len + self.max_tokens
     
     
     async def __call__(self, ctx: SemContext, priority: int = 0):
         
         executor = ctx.state.executor
-        raw_request = ctx.state.raw_request  
+        raw_request = ctx.state.raw_request
+        previous_pin_req_id = ctx.state.pin_req_id if self.pin else None
 
         prompt = self._build_prompt(ctx)
+        prompt_str = KVMemoryManager.get_instance().apply_chat_template(prompt)
+        input_token_len = KVMemoryManager.get_instance().token_length(prompt_str)
+        max_tokens = self._planned_max_tokens(ctx, input_token_len)
 
         output = await executor.execute(
             raw_request=raw_request,
             prompt=prompt,
-            max_tokens=self.max_tokens,
+            max_tokens=max_tokens,
             pin=self.pin,
             priority=priority,
         )
         
-        # resubmit if truncated with additional budget allocation
-        if output.finish_reason == "length":
-            # if self.pin:
-            #     await executor.unpin(raw_request, output.request_id)
-            
-            # Request additional budget: only ask for tokens beyond original max_tokens allocation
-            additional_tokens = max(0, SemMap.MAX_TOKEN_LIMIT - self.max_tokens)
-            retry_budget = additional_tokens * KVMemoryManager.get_instance().bytes_per_token
-            if ctx.state.stage_id is not None:
-                await KVMemoryManager.get_instance().allocate_stage(ctx.state.stage_id, retry_budget)
-            
-            try:
-                retry_t0 = perf_counter()
-                output = await executor.execute(
-                    raw_request=raw_request,
-                    prompt=prompt,
-                    max_tokens=SemMap.MAX_TOKEN_LIMIT,
-                    pin=self.pin,
-                    priority=priority-1,
+        if output.finish_reason == "length" and max_tokens < SemMap.MAX_TOKEN_LIMIT:
+            if self.pin:
+                ctx.state.pin_req_id = output.request_id
+            ctx.state.retry_op_position = self.position
+            ctx.state.retry_max_tokens = SemMap.MAX_TOKEN_LIMIT
+            if self.LOG_RETRY_TRACE:
+                print(
+                    "[sem-map] "
+                    f"retry-trigger stage={ctx.state.stage_id} "
+                    f"position={self.position} "
+                    f"request_id={output.request_id} "
+                    f"pin_req_id={ctx.state.pin_req_id} "
+                    f"from_max_tokens={max_tokens} "
+                    f"to_max_tokens={ctx.state.retry_max_tokens} "
+                    f"input_tokens={input_token_len}"
                 )
-                retry_elapsed = perf_counter() - retry_t0
-                print(f"SemMap output retry took {retry_elapsed:.3f}s with max_tokens={SemMap.MAX_TOKEN_LIMIT} (additional_tokens={additional_tokens})")
-            finally:
-                # Release retry budget
-                if ctx.state.stage_id is not None:
-                    await KVMemoryManager.get_instance().release_stage(ctx.state.stage_id, retry_budget)
+            if self.LOG:
+                print(
+                    "[sem-map] "
+                    f"retry-requeue stage={ctx.state.stage_id} "
+                    f"position={self.position} "
+                    f"request_id={output.request_id} "
+                    f"from_max_tokens={max_tokens} "
+                    f"to_max_tokens={SemMap.MAX_TOKEN_LIMIT}"
+                )
+            return RETRY_TASK
 
-        
-        prompt_str = KVMemoryManager.get_instance().apply_chat_template(prompt)
-        input_token_len = KVMemoryManager.get_instance().token_length(prompt_str)
+        if ctx.state.retry_op_position == self.position:
+            ctx.state.retry_op_position = -1
+            ctx.state.retry_max_tokens = 0
 
         appended_prompt, appended_prompt_str = add_assistant_prompt(prompt, output.text)
         ctx.input.data = appended_prompt
@@ -181,8 +214,18 @@ class SemMap(BaseOp):
         })
 
         if self.pin:
+            if (
+                previous_pin_req_id is not None
+                and previous_pin_req_id != output.request_id
+            ):
+                await executor.unpin(raw_request, previous_pin_req_id)
             ctx.state.pin_req_id = output.request_id
         elif self.unpin and ctx.state.pin_req_id:
+            if self.LOG:
+                print(
+                    "[sem-op] "
+                    f"SemMap unpin pin_req_id={ctx.state.pin_req_id}"
+                )
             await executor.unpin(raw_request, ctx.state.pin_req_id)
             ctx.state.pin_req_id = None
 
@@ -214,8 +257,100 @@ class CartesianProduct(BaseOp):
             out.append(new_ctx)
         return out
 
+
+class IndexedCartesianProduct(BaseOp):
+    def __init__(
+        self,
+        right_table,
+        service_address="127.0.0.1",
+        service_port=8080,
+        threshold=0.85,
+        position=-1,
+    ):
+        super().__init__(kind=OpKind.JOIN, position=position)
+        self.right_table = right_table
+        self.service_address = service_address
+        self.service_port = service_port
+        self.threshold = threshold
+        self._indexed_rows = [
+            (idx, right.input.data)
+            for idx, right in enumerate(self.right_table)
+        ]
+        self.cp_id = f"icp:{position}:{id(self)}"
+
+    def _post_icp(self, path, payload):
+        return requests.post(
+            f"http://{self.service_address}:{self.service_port}/{path}",
+            json=payload,
+            timeout=60,
+        )
+
+    def _build_remote_index(self) -> None:
+        response = self._post_icp(
+            "build_index",
+            {
+                "cp_id": self.cp_id,
+                "right_table": [list(row) for row in self._indexed_rows],
+            },
+        )
+        response.raise_for_status()
+
+    def _query_retrieval(self, left_row: tuple[Any, ...]) -> list[dict[str, Any]]:
+        payload = {
+            "cp_id": self.cp_id,
+            "left_tuple": list(left_row),
+            "threshold": self.threshold,
+        }
+
+        response = self._post_icp("query", payload)
+        if response.ok:
+            return response.json()["results"]
+        
+        self._build_remote_index()
+
+        retry_response = self._post_icp("query", payload)
+        retry_response.raise_for_status()
+        return retry_response.json()["results"]
+
+    def __call__(self, ctx):
+        if not self.right_table:
+            return []
+
+        left_row = (ctx.state.idx, ctx.input.data)
+        try:
+            ranked_rows = self._query_retrieval(left_row)
+        except requests.RequestException:
+            ranked_rows = [
+                {"metadata": [idx], "score": 0.0}
+                for idx in range(len(self.right_table))
+            ]
+
+        out = []
+        for row in ranked_rows:
+            metadata = row["metadata"]
+            right_idx = int(metadata[0])
+            right = self.right_table[right_idx]
+            base_input = SemanticInput(
+                data=ctx.input.data[:],
+                right_data=[],
+            )
+            _input = base_input.add_right(right.input.data)
+            new_ctx = SemContext(
+                input=_input,
+                state=ExecutionState(
+                    raw_request=ctx.state.raw_request,
+                    pin_req_id=None,
+                    executor=ctx.state.executor,
+                ),
+            )
+            out.append(new_ctx)
+
+        return out
+
         
 class SemClassify(BaseOp):
+    LOG = False
+
     def __init__(self, classes, pin=False, unpin=False, position=-1):
         super().__init__(kind=OpKind.TUPLE_INDEPENDENT, position=position)
         self.classes = list(classes)
@@ -280,6 +415,11 @@ class SemClassify(BaseOp):
             ctx.state.pin_req_id = data_result.request_id
 
         elif self.unpin and ctx.state.pin_req_id is not None:
+            if self.LOG:
+                print(
+                    "[sem-op] "
+                    f"SemClassify unpin pin_req_id={ctx.state.pin_req_id}"
+                )
             await ctx.state.executor.unpin(ctx.state.raw_request, ctx.state.pin_req_id)
             ctx.state.pin_req_id = None
 

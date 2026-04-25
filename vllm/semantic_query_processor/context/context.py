@@ -18,16 +18,33 @@ class SemanticInput:
     def add_right(self, value):
         self.right_data += value
         return self
-    
-    
+
+
+class _RetrySignal:
+    pass
+
+
+RETRY_TASK = _RetrySignal()
+
+
+@dataclass
+class RetryTaskResult:
+    ctx: Any
+    op_index: int
+    retain_budget: bool = False
+
+
 @dataclass
 class ExecutionState:
     raw_request: Any = None
     pin_req_id: Any = None
     executor: LLMExecutor = None
     predicate: bool = True
-    idx: int=-1
-    
+    idx: int = -1
+    stage_id: int = -1
+    retry_op_position: int = -1
+    retry_max_tokens: int = 0
+
 
 @dataclass
 class SemContext:
