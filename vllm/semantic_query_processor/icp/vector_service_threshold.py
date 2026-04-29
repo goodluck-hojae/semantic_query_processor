@@ -34,7 +34,7 @@ class SentenceTransformersRM:
 
 
 # -----------------------------
-# FAISS Vector Store
+# FAISS Vector Store (NO k)
 # -----------------------------
 class FaissVS:
     def __init__(self, dim: int):
@@ -53,25 +53,25 @@ class FaissVS:
     def search(
         self,
         query_embedding: np.ndarray,
-        top_k: int,
+        threshold: float,
     ) -> list[dict[str, Any]]:
         if self.index.ntotal == 0:
             return []
 
-        k = min(top_k, self.index.ntotal)
-        if k <= 0:
-            return []
-
         query = np.array([query_embedding]).astype("float32")
-        D, I = self.index.search(query, k)
+        lims, D, I = self.index.range_search(query, threshold)
 
         results: list[dict[str, Any]] = []
-        for idx in range(k):
+        start, end = lims[0], lims[1]
+
+        for idx in range(start, end):
             results.append({
-                "metadata": list(self.metadata[I[0][idx]]),
-                "score": float(D[0][idx]),
+                "metadata": list(self.metadata[I[idx]]),
+                "score": float(D[idx]),
             })
 
+        # sort for deterministic output
+        results.sort(key=lambda x: x["score"], reverse=True)
         return results
 
 
@@ -116,7 +116,7 @@ class VectorDBService:
         cp_id: str,
         left_tuple: tuple[Any, ...],
         right_table: list[tuple[Any, ...]] | None,
-        top_k: int = 5,
+        threshold: float=0.5,
     ) -> list[dict[str, Any]]:
         if right_table is not None:
             vs = self.build_index(cp_id, right_table)
@@ -128,7 +128,7 @@ class VectorDBService:
         query_text = _serialize_tuple(left_tuple)
         query_vec = self.rm.encode([query_text])[0]
 
-        return vs.search(query_vec, top_k)
+        return vs.search(query_vec, threshold)
 
     def clear_cp(self, cp_id: str) -> bool:
         removed = False
@@ -159,7 +159,7 @@ class QueryRequest(BaseModel):
     cp_id: str
     left_tuple: list[Any]
     right_table: list[list[Any]] | None = None
-    top_k: int = Field(gt=0)
+    threshold: float
 
 
 class ClearRequest(BaseModel):
@@ -207,7 +207,7 @@ def create_app(model_name: str = "intfloat/e5-base-v2") -> FastAPI:
                 None if request.right_table is None else [
                     _normalize_tuple(r) for r in request.right_table
                 ],
-                request.top_k,
+                request.threshold,
             )
         except ValueError as e:
             raise HTTPException(400, str(e))

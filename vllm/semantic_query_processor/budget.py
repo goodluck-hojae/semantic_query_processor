@@ -151,6 +151,7 @@ class KVMemoryManager:
         self,
         stage_id: int,
         quantum_fraction: float = 0.05,
+        force_return: bool = False,
     ) -> bool:
         quantum = max(1, int(self._capacity * quantum_fraction))
 
@@ -158,7 +159,8 @@ class KVMemoryManager:
             cur_cap = self._stage_capacity.get(stage_id, 0)
             min_cap = self._stage_min_capacity.get(stage_id, cur_cap)
             cur_used = self._stage_used.get(stage_id, 0)
-            releasable = cur_cap - max(min_cap, cur_used)
+            floor = cur_used if force_return else max(min_cap, cur_used)
+            releasable = cur_cap - floor
             if releasable <= 0:
                 return False
 

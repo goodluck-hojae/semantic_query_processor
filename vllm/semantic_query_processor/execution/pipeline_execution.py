@@ -211,7 +211,7 @@ class AsyncPipelineExecutor:
             # can absorb capacity when they are the bottleneck.
             for stage in stages:
                 if stage.ready_count() == 0 and stage.running_count() == 0:
-                    if await self.manager.return_stage_capacity(stage.stage_id):
+                    if await self.manager.return_stage_capacity(stage.stage_id, force_return=True):
                         changed = True
 
             # Grow any stage with a saturated queue. Prefer borrowing from the
@@ -220,10 +220,9 @@ class AsyncPipelineExecutor:
                 if not stage.is_saturated():
                     continue
 
-                donor_hint = stages[idx - 1].stage_id if idx > 0 else None
                 if await self.manager.rebalance_stage_capacity(
-                    receiver_id=stage.stage_id,
-                    donor_hint=donor_hint,
+                    receiver_id=stages[-1].stage_id,
+                    donor_hint=stages[idx].stage_id,
                 ):
                     changed = True
 
@@ -292,7 +291,7 @@ class AsyncPipelineExecutor:
                     if task is None:
                         break
 
-                    if await stage.try_accept(task, self.manager) is None:
+                    if await stage.accept(task, self.manager) is None:
                         break
 
                     record_input(stage.stage_id)

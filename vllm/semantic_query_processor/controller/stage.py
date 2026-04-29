@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+import math
 from itertools import count
 from typing import Any
 
@@ -39,7 +40,7 @@ class Stage:
         self.running_tasks = {}
         self.bytes_per_token = KVMemoryManager.get_instance().bytes_per_token
         self.low_threshold = 1
-        self.high_threshold = 4
+        self.high_threshold = 5
 
     def _infer_kind(self) -> OpKind:
         return OpKind.TUPLE_INDEPENDENT
@@ -85,14 +86,12 @@ class Stage:
         return self.ready_count() > self.high_threshold
 
     def tune_thresholds(self):
-        if self.ready_count() == 0:
-            self.low_threshold = max(1, self.low_threshold - 1)
-            self.high_threshold = max(
-                self.low_threshold + 1,
-                self.high_threshold - 1,
-            )
-        elif self.ready_count() > self.high_threshold:
-            self.high_threshold += 1
+        manager = KVMemoryManager.get_instance()
+        min_budget = int(manager._stage_min_capacity.get(self.stage_id, 0))
+
+        _, cur_cap = manager.stage_usage(self.stage_id)
+        self.high_threshold = max(1, cur_cap // min_budget)
+        self.low_threshold = max(1, int(0.2 * cur_cap // min_budget))
 
     def peek_task(self) -> Task | None:
         if not self.waiting_tasks:
@@ -119,19 +118,8 @@ class Stage:
 
         return max_boundary * self.bytes_per_token
 
-    # def memory_limit(self, manager=None) -> int:
-    #     manager = manager or KVMemoryManager.get_instance()
-    #     _, limit = manager.stage_usage(self.stage_id)
-    #     return limit
 
-    # async def can_accept(self, task: Task, manager=None) -> bool:
-    #     manager = manager or KVMemoryManager.get_instance()
-    #     return await manager.can_admit_stage(
-    #         self.stage_id,
-    #         self.estimate_budget(task),
-    #     )
-
-    async def try_accept(self, task: Task, manager=None) -> int | None:
+    async def accept(self, task: Task, manager=None) -> int | None:
         manager = manager or KVMemoryManager.get_instance()
         if task.reserved_budget > 0:
             budget = task.reserved_budget
@@ -145,12 +133,6 @@ class Stage:
         self.running_tasks[task.task_id] = budget
         return budget
 
-    # async def accept(self, task: Task, manager=None) -> int:
-    #     manager = manager or KVMemoryManager.get_instance()
-    #     budget = self.estimate_budget(task)
-    #     await manager.allocate_stage(self.stage_id, budget)
-    #     self.running_tasks[task.task_id] = budget
-    #     return budget
 
     async def force_accept(self, task: Task, manager=None) -> int:
         manager = manager or KVMemoryManager.get_instance()

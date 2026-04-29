@@ -1,3 +1,5 @@
+import random
+
 from vllm.semantic_query_processor.sem_ops import OpKind, OpName, ops
 from vllm.semantic_query_processor.query import Query
 from vllm.semantic_query_processor.data import data
@@ -7,6 +9,7 @@ from vllm.semantic_query_processor.controller.map_estimator import MapRatioEstim
 from .stage import Stage, Task, stage_builder
 
 class SemanticPlan:
+    ESTIMATED_CTX_SAMPLE_SIZE = 100
 
     def __init__(self, executor):
         self.executor = executor
@@ -60,14 +63,18 @@ class SemanticPlan:
             estimated_ctxs = list(ctxs)
 
             for stage in current_segment:
+                sampled_ctxs = estimated_ctxs
+                if len(estimated_ctxs) > self.ESTIMATED_CTX_SAMPLE_SIZE:
+                    sampled_ctxs = random.sample(
+                        estimated_ctxs,
+                        self.ESTIMATED_CTX_SAMPLE_SIZE,
+                    )
                 budgets = [
                     stage.estimate_budget(Task(ctx=ctx, stage_index=0))
-                    for ctx in estimated_ctxs
+                    for ctx in sampled_ctxs
                 ]
                 if budgets:
                     stage_min_caps[stage.stage_id] = max(budgets)
-                else:
-                    stage_min_caps[stage.stage_id] = kv.bytes_per_token
 
                 if stage.fanout_op is not None:
                     next_ctxs = []
@@ -82,38 +89,23 @@ class SemanticPlan:
                     min_fraction=1.0,
                     max_fraction=1.0,
                 )
-
-            
             # Start early stages at their minimum admission budget and give the
             # last stage the remaining capacity, since it is usually the
             # bottleneck after fanout.
             elif num_stages > 1:
                 total_capacity = kv.capacity()
-                total_min_needed = sum(stage_min_caps[sid] for sid in stage_ids)
-
-                if total_min_needed >= total_capacity:
-                    assigned_caps = {
-                        sid: max(
-                            kv.bytes_per_token,
-                            int(total_capacity * stage_min_caps[sid] / total_min_needed),
-                        )
-                        for sid in stage_ids
-                    }
-                else:
-                    assigned_caps = {
-                        sid: stage_min_caps[sid]
-                        for sid in stage_ids[:-1]
-                    }
-                    assigned_caps[stage_ids[-1]] = total_capacity - sum(
-                        assigned_caps.values()
-                    )
+                assigned_caps = {
+                    sid: stage_min_caps.get(sid, 0)
+                    for sid in stage_ids[:-1]
+                }
+                assigned_caps[stage_ids[-1]] = total_capacity - sum(
+                    assigned_caps.values()
+                )
+                
 
                 for idx, sid in enumerate(stage_ids):
                     assigned_cap = max(kv.bytes_per_token, assigned_caps[sid])
-                    protected_min_cap = max(
-                        kv.bytes_per_token,
-                        stage_min_caps[sid],
-                    )
+                    protected_min_cap = stage_min_caps.get(sid, 0)
                     initial_fraction = min(1.0, assigned_cap / total_capacity)
                     if idx == num_stages - 1:
                         max_fraction = 1.0
@@ -287,15 +279,12 @@ class SemanticPlan:
                 )
 
             elif name == OpName.JOIN:
-                enable_icp = args.get("enable_icp")
+                icp = args.get("icp", False)
                 right_table = list(
                     data._data_source(None, args["right_table"], None)
                 )
 
-                if enable_icp is False:
-                    continue
-
-                if enable_icp is True:
+                if icp is True:
                     physical.append(
                         ops.IndexedCartesianProduct(
                             right_table=right_table,
@@ -304,7 +293,7 @@ class SemanticPlan:
                                 "127.0.0.1",
                             ),
                             service_port=args.get("icp_port", 8000),
-                            threshold=args.get("icp_threshold", 0.5),
+                            top_k=args.get("icp_top_k", 5),
                             position=idx,
                         )
                     )
@@ -348,13 +337,7 @@ class SemanticPlan:
         plan = self.build(ctxs, physical_ops)
         self.print_plan(plan)
 
-        warmup_count = min(len(ctxs), max(0, len(ctxs) // 20))
-        warmup_out = []
-        if warmup_count > 0:
-            warmup_out = await self.warmup(ctxs[:warmup_count], plan)
-        print('warm up done')
-        main_out, _ = await self.plan_executor.execute(ctxs[warmup_count:], plan)
-        out = warmup_out + main_out
+        out, _ = await self.plan_executor.execute(ctxs, plan)
         MapRatioEstimator.instance().reset()
         print(f'len(out){len(out)}')
         return out 

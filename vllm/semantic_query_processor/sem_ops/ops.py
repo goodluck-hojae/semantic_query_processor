@@ -1,3 +1,5 @@
+import asyncio
+
 from .base import BaseOp, OpKind, OpName
 from vllm.semantic_query_processor.context import (
     RETRY_TASK,
@@ -258,20 +260,109 @@ class CartesianProduct(BaseOp):
         return out
 
 
+# class IndexedCartesianProduct(BaseOp):
+#     def __init__(
+#         self,
+#         right_table,
+#         service_address="127.0.0.1",
+#         service_port=8080,
+#         top_k=5,
+#         position=-1,
+#     ):
+#         super().__init__(kind=OpKind.JOIN, position=position)
+#         self.right_table = right_table
+#         self.service_address = service_address
+#         self.service_port = service_port
+#         self.top_k = top_k
+#         self._indexed_rows = [
+#             (idx, right.input.data)
+#             for idx, right in enumerate(self.right_table)
+#         ]
+#         self.cp_id = f"icp:{position}:{id(self)}"
+
+#     def _post_icp(self, path, payload):
+#         return requests.post(
+#             f"http://{self.service_address}:{self.service_port}/{path}",
+#             json=payload,
+#             timeout=60,
+#         )
+
+#     def _build_remote_index(self) -> None:
+#         response = self._post_icp(
+#             "build_index",
+#             {
+#                 "cp_id": self.cp_id,
+#                 "right_table": [list(row) for row in self._indexed_rows],
+#             },
+#         )
+#         response.raise_for_status()
+
+#     def _query_retrieval(self, left_row: tuple[Any, ...]) -> list[dict[str, Any]]:
+#         payload = {
+#             "cp_id": self.cp_id,
+#             "left_tuple": list(left_row),
+#             "top_k": self.top_k,
+#         }
+
+#         response = self._post_icp("query", payload)
+#         if response.ok:
+#             return response.json()["results"]
+        
+#         self._build_remote_index()
+
+#         retry_response = self._post_icp("query", payload)
+#         retry_response.raise_for_status()
+#         return retry_response.json()["results"]
+
+#     def __call__(self, ctx):
+#         if not self.right_table:
+#             return []
+
+#         left_row = (ctx.state.idx, ctx.input.data)
+#         try:
+#             ranked_rows = self._query_retrieval(left_row)
+#         except requests.RequestException:
+#             ranked_rows = [
+#                 {"metadata": [idx], "score": 0.0}
+#                 for idx in range(len(self.right_table))
+#             ]
+
+#         out = []
+#         for row in ranked_rows:
+#             metadata = row["metadata"]
+#             right_idx = int(metadata[0])
+#             right = self.right_table[right_idx]
+#             base_input = SemanticInput(
+#                 data=ctx.input.data[:],
+#                 right_data=[],
+#             )
+#             _input = base_input.add_right(right.input.data)
+#             new_ctx = SemContext(
+#                 input=_input,
+#                 state=ExecutionState(
+#                     raw_request=ctx.state.raw_request,
+#                     pin_req_id=None,
+#                     executor=ctx.state.executor,
+#                 ),
+#             )
+#             out.append(new_ctx)
+
+#         return out
+
 class IndexedCartesianProduct(BaseOp):
     def __init__(
         self,
         right_table,
         service_address="127.0.0.1",
         service_port=8080,
-        threshold=0.85,
+        top_k=5,
         position=-1,
     ):
         super().__init__(kind=OpKind.JOIN, position=position)
         self.right_table = right_table
         self.service_address = service_address
         self.service_port = service_port
-        self.threshold = threshold
+        self.top_k = top_k
         self._indexed_rows = [
             (idx, right.input.data)
             for idx, right in enumerate(self.right_table)
@@ -299,13 +390,13 @@ class IndexedCartesianProduct(BaseOp):
         payload = {
             "cp_id": self.cp_id,
             "left_tuple": list(left_row),
-            "threshold": self.threshold,
+            "top_k": self.top_k,
         }
 
         response = self._post_icp("query", payload)
         if response.ok:
             return response.json()["results"]
-        
+
         self._build_remote_index()
 
         retry_response = self._post_icp("query", payload)
@@ -347,7 +438,7 @@ class IndexedCartesianProduct(BaseOp):
 
         return out
 
-        
+
 class SemClassify(BaseOp):
     LOG = False
 
@@ -562,6 +653,8 @@ class SemAgg(BaseOp):
 
 
 class SemTopK(BaseOp):
+    MERGE_RANK_THRESHOLD = 8
+
     def __init__(self, instruction: str, k: int= 10, concurrency: int = 20, position=-1):
         super().__init__(kind=OpKind.BLOCKING, position=position)
         
@@ -608,8 +701,9 @@ class SemTopK(BaseOp):
 
         if len(better) >= k:
             return await self._quickselect(better, k)
-        else:
-            return better + await self._quickselect(worse, k - len(better))
+        if len(better) + 1 == k:
+            return better + [pivot]
+        return better + [pivot] + await self._quickselect(worse, k - len(better) - 1)
 
 
     async def _partition(self, pivot: SemContext, others: List[SemContext]):
@@ -659,6 +753,17 @@ class SemTopK(BaseOp):
         if len(ctxs) <= 1:
             return ctxs
 
+        if len(ctxs) < self.MERGE_RANK_THRESHOLD:
+            return await self._rank_insertion(ctxs)
+
+        mid = len(ctxs) // 2
+        left, right = await asyncio.gather(
+            self._rank(ctxs[:mid]),
+            self._rank(ctxs[mid:]),
+        )
+        return await self._merge_ranked(left, right)
+
+    async def _rank_insertion(self, ctxs: List[SemContext]) -> List[SemContext]:
         ranked: List[SemContext] = []
 
         for ctx in ctxs:
@@ -673,6 +778,27 @@ class SemTopK(BaseOp):
                 ranked.append(ctx)
 
         return ranked
+
+    async def _merge_ranked(self, left: List[SemContext], right: List[SemContext]) -> List[SemContext]:
+        merged: List[SemContext] = []
+        i = 0
+        j = 0
+
+        while i < len(left) and j < len(right):
+            better = await self._compare(left[i], right[j])
+            if better:
+                merged.append(left[i])
+                i += 1
+            else:
+                merged.append(right[j])
+                j += 1
+
+        if i < len(left):
+            merged.extend(left[i:])
+        if j < len(right):
+            merged.extend(right[j:])
+
+        return merged
 
     async def _compare(self, a: SemContext, b: SemContext) -> bool:
         executor = a.state.executor 
