@@ -29,10 +29,11 @@ class VLLMExecutor(LLMExecutor):
         return ChatCompletionRequest(
             model=self.model,
             messages=message,
-            max_tokens=max_tokens,
+            max_tokens=min(max_tokens, 8192),
             temperature=0.0,
             seed=42,
             top_p=1.0,
+            repetition_penalty=1.1,
             priority=priority,
             vllm_xargs={"pinned": pin},
         )
@@ -42,10 +43,11 @@ class VLLMExecutor(LLMExecutor):
         return CompletionRequest(
             model=self.model,
             prompt=prompt,
-            max_tokens=max_tokens,
+            max_tokens=min(max_tokens, 8192),
             temperature=0.0,
             seed=42,
             top_p=1.0,
+            repetition_penalty=1.1,
             priority=priority,
             vllm_xargs={"pinned": pin},
         )
