@@ -1539,8 +1539,19 @@ async def init_app_state(
         "Starting Semantic Query processor"
     )
     model_name = state.engine_client.vllm_config.model_config.model
-    budget = await state.engine_client.engine_core.call_utility_async(
+    per_gpu_budget = await state.engine_client.engine_core.call_utility_async(
         "get_kv_cache_budget"
+    )
+    tp_size = (
+        state.engine_client.vllm_config.parallel_config.tensor_parallel_size
+    )
+    budget = per_gpu_budget * tp_size
+    gib = 1024**3
+    logger.info(
+        "Semantic Query processor KV budget: per_gpu=%.2f GiB tp_size=%s total=%.2f GiB",
+        per_gpu_budget / gib,
+        tp_size,
+        budget / gib,
     )
 
     # Query processor currently doesn't reflect other requests' budget usage

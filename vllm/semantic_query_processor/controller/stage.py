@@ -88,6 +88,8 @@ class Stage:
     def tune_thresholds(self):
         manager = KVMemoryManager.get_instance()
         min_budget = int(manager._stage_min_capacity.get(self.stage_id, 0))
+        if min_budget <= 0:
+            min_budget = max(1, int(self.bytes_per_token))
 
         _, cur_cap = manager.stage_usage(self.stage_id)
         self.high_threshold = max(1, cur_cap // min_budget)
