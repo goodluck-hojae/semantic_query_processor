@@ -10,6 +10,7 @@ class OpName:
     SEM_MAP = "sem_map"
     SEM_AGG = "sem_agg"
     JOIN = "join"
+    CARTESIAN_PRODUCT = "cp"
 
 
 OPERATOR_LIST = [
@@ -20,6 +21,7 @@ OPERATOR_LIST = [
     OpName.SEM_MAP,
     OpName.SEM_AGG,
     OpName.JOIN,
+    OpName.CARTESIAN_PRODUCT,
 ]
 
 

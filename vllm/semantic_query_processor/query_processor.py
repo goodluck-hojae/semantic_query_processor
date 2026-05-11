@@ -66,7 +66,7 @@ class QueryProcessor:
                     engine_client.engine_core.call_utility_async(
                         "get_scheduler_state"
                     ),
-                    timeout=5.0,
+                    timeout=2.0,
                 )
             except asyncio.TimeoutError:
                 self._consecutive_timeout_checks += 1
@@ -89,7 +89,7 @@ class QueryProcessor:
                             "unpin_requests",
                             request_ids,
                         ),
-                        timeout=5.0,
+                        timeout=self.STUCK_CHECK_INTERVAL_SEC,
                     )
                 except asyncio.TimeoutError:
                     print("[QueryProcessor] timed out while unpinning timeout-triggered pinned requests")
@@ -141,7 +141,7 @@ class QueryProcessor:
                         "unpin_requests",
                         request_ids,
                     ),
-                    timeout=5.0,
+                    timeout=self.STUCK_CHECK_INTERVAL_SEC,
                 )
             except asyncio.TimeoutError:
                 print("[QueryProcessor] timed out while unpinning stuck pinned requests")
@@ -173,7 +173,7 @@ class QueryProcessor:
                     "unpin_requests",
                     request_ids,
                 ),
-                timeout=5.0,
+                timeout=self.STUCK_CHECK_INTERVAL_SEC,
             )
         except asyncio.TimeoutError:
             print("[QueryProcessor] timed out while cleaning up finished-query pinned requests")

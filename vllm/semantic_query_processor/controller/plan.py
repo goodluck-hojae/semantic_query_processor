@@ -312,6 +312,33 @@ class SemanticPlan:
                     )
                 )
 
+            elif name == OpName.CARTESIAN_PRODUCT:
+                icp = args.get("icp", False)
+                right_table = list(
+                    data._data_source(None, args["right_table"], None)
+                )
+
+                if icp is True:
+                    physical.append(
+                        ops.IndexedCartesianProduct(
+                            right_table=right_table,
+                            service_address=args.get(
+                                "icp_address",
+                                "127.0.0.1",
+                            ),
+                            service_port=args.get("icp_port", 8000),
+                            top_k=args.get("icp_top_k", 5),
+                            position=idx,
+                        )
+                    )
+                else:
+                    physical.append(
+                        ops.CartesianProduct(
+                            right_table=right_table,
+                            position=idx
+                        )
+                    )
+
             else:
                 raise ValueError(f"Unknown op: {name}")
 

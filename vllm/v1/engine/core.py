@@ -330,7 +330,7 @@ class EngineCore:
             "kv_cache_usage": kv_cache_usage,
             "is_stuck": (
                 num_waiting_reqs > 0
-                and kv_cache_usage == 1.0
+                and kv_cache_usage >= 0.99
             ),
         }
 
