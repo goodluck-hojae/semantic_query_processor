@@ -29,7 +29,7 @@ class VLLMExecutor(LLMExecutor):
         return ChatCompletionRequest(
             model=self.model,
             messages=message,
-            max_tokens=min(max_tokens, 8192),
+            max_tokens=min(max_tokens, 16384),
             temperature=0.0,
             seed=42,
             top_p=1.0,
@@ -44,7 +44,7 @@ class VLLMExecutor(LLMExecutor):
         return CompletionRequest(
             model=self.model,
             prompt=prompt,
-            max_tokens=min(max_tokens, 8192),
+            max_tokens=min(max_tokens, 16384),
             temperature=0.0,
             seed=42,
             top_p=1.0,

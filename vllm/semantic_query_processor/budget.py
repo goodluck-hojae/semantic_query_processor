@@ -43,6 +43,7 @@ class KVMemoryManager:
     _instance = None
     _init_lock = threading.Lock()
     LOG = False
+    REBALANCE_LOG = False
     def __init__(self, model_name, kv_capacity, dtype):
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.bytes_per_token = compute_bytes_per_token(model_name, dtype)
@@ -79,6 +80,8 @@ class KVMemoryManager:
         self._stage_inflight[stage_id] = 0
 
     def _log_rebalance(self, event: str):
+        if not self.REBALANCE_LOG:
+            return
         stage_states = []
         for stage_id in sorted(self._stage_capacity):
             stage_states.append(

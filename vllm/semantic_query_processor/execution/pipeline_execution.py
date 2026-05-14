@@ -1,8 +1,10 @@
 import asyncio
+# import math
 import time
 
 from vllm.semantic_query_processor.budget import KVMemoryManager
 from vllm.semantic_query_processor.context import RetryTaskResult
+# from vllm.semantic_query_processor.controller.map_estimator import MapRatioEstimator
 from vllm.semantic_query_processor.controller.stage import Task
 from vllm.semantic_query_processor.sem_ops import OpKind, ops
 
@@ -105,6 +107,7 @@ class AsyncPipelineExecutor:
     LOG_SCHEDULER = True
     LOG_SCHEDULER_INTERVAL_SEC = 1.0
     LOG_RETRY_TRACE = True
+    LOG_DEFERRAL_TRACE = False
 
     def __init__(self):
         self.manager = KVMemoryManager.get_instance()
@@ -282,6 +285,31 @@ class AsyncPipelineExecutor:
                 }
             return details
 
+        # def refresh_retry_max_tokens(stage, task):
+        #     retry_position = task.ctx.state.retry_op_position
+        #     if retry_position < 0 or task.op_index >= len(stage.operators):
+        #         return
+        #
+        #     op = stage.operators[task.op_index]
+        #     if not isinstance(op, ops.SemMap) or op.position != retry_position:
+        #         return
+        #
+        #     ratio = MapRatioEstimator.instance().get_ratio(retry_position)
+        #     if ratio is None:
+        #         return
+        #
+        #     prompt = op._build_prompt(task.ctx)
+        #     prompt_str = KVMemoryManager.get_instance().apply_chat_template(prompt)
+        #     prompt_token_len = KVMemoryManager.get_instance().token_length(prompt_str)
+        #     max_tokens = max(
+        #         1,
+        #         min(
+        #             ops.SemMap.MAX_TOKEN_LIMIT,
+        #             math.ceil(ratio * prompt_token_len),
+        #         ),
+        #     )
+        #     task.ctx.state.retry_max_tokens = max_tokens
+
         async def launch_ready_tasks():
             launched = False
 
@@ -291,6 +319,7 @@ class AsyncPipelineExecutor:
                     if task is None:
                         break
 
+                    # refresh_retry_max_tokens(stage, task)
                     if await stage.accept(task, self.manager) is None:
                         break
 
@@ -315,6 +344,7 @@ class AsyncPipelineExecutor:
 
                 record_input(stage.stage_id)
                 stage.pop_task()
+                # refresh_retry_max_tokens(stage, task)
                 await stage.force_accept(task, self.manager)
                 log_running_tasks(
                     f"force-start task={task.task_id} stage={stage.stage_id}"
@@ -428,14 +458,15 @@ class AsyncPipelineExecutor:
                     trackers = task.trackers
                     if task.ctx.state.pin_req_id is not None:
                         add_deferred_parent(stage.stage_id, budget)
-                        print(
-                            "[scheduler] "
-                            f"defer-release task={task.task_id} "
-                            f"stage={stage.stage_id} "
-                            f"children={len(child_ctxs)} "
-                            f"budget={budget} "
-                            f"pin_req_id={task.ctx.state.pin_req_id}"
-                        )
+                        if self.LOG_DEFERRAL_TRACE:
+                            print(
+                                "[scheduler] "
+                                f"defer-release task={task.task_id} "
+                                f"stage={stage.stage_id} "
+                                f"children={len(child_ctxs)} "
+                                f"budget={budget} "
+                                f"pin_req_id={task.ctx.state.pin_req_id}"
+                            )
                         trackers = trackers + (
                             JoinTracker(
                                 task.ctx,

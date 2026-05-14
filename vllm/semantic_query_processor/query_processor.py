@@ -10,7 +10,7 @@ from vllm.semantic_query_processor.pin_registry import PinnedRequestRegistry
 
 
 class QueryProcessor:
-    STUCK_CHECK_INTERVAL_SEC = 5.0
+    STUCK_CHECK_INTERVAL_SEC = 2.0
     STUCK_CONFIRMATION_COUNT = 2
     UNPIN_COOLDOWN_SEC = 10.0
 
