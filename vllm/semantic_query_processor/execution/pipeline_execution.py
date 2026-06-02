@@ -106,7 +106,7 @@ class JoinTracker:
 class AsyncPipelineExecutor:
     LOG_SCHEDULER = True
     LOG_SCHEDULER_INTERVAL_SEC = 1.0
-    LOG_RETRY_TRACE = True
+    LOG_RETRY_TRACE = False
     LOG_DEFERRAL_TRACE = False
 
     def __init__(self):

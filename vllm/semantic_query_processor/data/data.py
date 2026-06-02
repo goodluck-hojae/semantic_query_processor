@@ -44,7 +44,18 @@ def _csv_reader(raw_request, path: Path, executor):
         reader = csv.DictReader(f)
         rows = list(reader)
         for idx, row in enumerate(rows):
-            text = str(row["data"]).strip()
+            if "data" in row:
+                text = str(row["data"]).strip()
+            elif "Text" in row and "Sentences" in row:
+                text = (
+                    f"Text ID: {str(row.get('Text ID', '')).strip()}\n\n"
+                    f"Clinical note:\n{str(row['Text']).strip()}\n\n"
+                    f"Numbered sentences:\n{str(row['Sentences']).strip()}"
+                )
+            elif "Text" in row:
+                text = str(row["Text"]).strip()
+            else:
+                text = " ".join(str(value).strip() for value in row.values())
             yield SemContext(
                 input=SemanticInput(
                         data=text,
@@ -103,5 +114,4 @@ def research_category_data():
 #             idx=int(path.name.split('.')[0])
 #         ),
 #     )
-
 

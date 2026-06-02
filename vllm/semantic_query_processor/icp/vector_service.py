@@ -1,4 +1,6 @@
 import argparse
+import os
+import sys
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -16,6 +18,14 @@ def _normalize_tuple(values: list[Any] | tuple[Any, ...]) -> tuple[Any, ...]:
 
 def _serialize_tuple(t: tuple[Any, ...]) -> str:
     return " ".join(map(str, t))
+
+
+def _query_text(left_tuple: tuple[Any, ...]) -> str:
+    if len(left_tuple) == 1:
+        return str(left_tuple[0])
+    if len(left_tuple) == 2:
+        return str(left_tuple[1])
+    return _serialize_tuple(left_tuple)
 
 
 # -----------------------------
@@ -50,7 +60,7 @@ class FaissVS:
         self.index.add(embeddings.astype("float32"))
         self.metadata.extend(metadata)
 
-    def search(
+    def search_top_k(
         self,
         query_embedding: np.ndarray,
         top_k: int,
@@ -72,6 +82,35 @@ class FaissVS:
                 "score": float(D[0][idx]),
             })
 
+        return results
+
+    def search_threshold(
+        self,
+        query_embedding: np.ndarray,
+        low_threshold: float,
+        high_threshold: float,
+    ) -> list[dict[str, Any]]:
+        if self.index.ntotal == 0:
+            return []
+
+        if low_threshold >= high_threshold:
+            raise ValueError("low_threshold must be < high_threshold.")
+
+        query = np.array([query_embedding]).astype("float32")
+        lims, D, I = self.index.range_search(query, low_threshold)
+
+        results: list[dict[str, Any]] = []
+        start, end = lims[0], lims[1]
+        for idx in range(start, end):
+            score = float(D[idx])
+            if score <= low_threshold or score >= high_threshold:
+                continue
+            results.append({
+                "metadata": list(self.metadata[I[idx]]),
+                "score": score,
+            })
+
+        results.sort(key=lambda x: x["score"], reverse=True)
         return results
 
 
@@ -116,7 +155,9 @@ class VectorDBService:
         cp_id: str,
         left_tuple: tuple[Any, ...],
         right_table: list[tuple[Any, ...]] | None,
-        top_k: int = 5,
+        top_k: int | None = None,
+        low_threshold: float | None = None,
+        high_threshold: float | None = None,
     ) -> list[dict[str, Any]]:
         if right_table is not None:
             vs = self.build_index(cp_id, right_table)
@@ -125,10 +166,26 @@ class VectorDBService:
             if vs is None:
                 raise ValueError(f"No index for cp_id={cp_id!r}")
 
-        query_text = _serialize_tuple(left_tuple)
+        query_text = _query_text(left_tuple)
         query_vec = self.rm.encode([query_text])[0]
 
-        return vs.search(query_vec, top_k)
+        threshold_mode = (
+            low_threshold is not None
+            or high_threshold is not None
+        )
+        if threshold_mode:
+            if low_threshold is None or high_threshold is None:
+                raise ValueError(
+                    "Both low_threshold and high_threshold are required "
+                    "for threshold search."
+                )
+            return vs.search_threshold(query_vec, low_threshold, high_threshold)
+
+        if top_k is None:
+            raise ValueError(
+                "top_k is required when thresholds are not specified."
+            )
+        return vs.search_top_k(query_vec, top_k)
 
     def clear_cp(self, cp_id: str) -> bool:
         removed = False
@@ -147,6 +204,67 @@ class VectorDBService:
         }
 
 
+class ColBERTVectorDBService:
+    def __init__(
+        self,
+        colbert_wiki_path: str,
+        index_name: str,
+        experiment_root: str,
+        experiment: str,
+        collection: str,
+        colbert_root: str,
+    ):
+        if colbert_wiki_path not in sys.path:
+            sys.path.insert(0, colbert_wiki_path)
+
+        from ColbertWiki import ColbertWiki
+
+        self.index_name = index_name
+        self.wiki = ColbertWiki(
+            index_name=index_name,
+            experiment_root=experiment_root,
+            experiment=experiment,
+            collection=collection,
+            colbert_root=colbert_root,
+        )
+
+    def build_index(
+        self,
+        cp_id: str,
+        right_table: list[tuple[Any, ...]],
+    ) -> Any:
+        return self
+
+    def query(
+        self,
+        cp_id: str,
+        left_tuple: tuple[Any, ...],
+        right_table: list[tuple[Any, ...]] | None,
+        top_k: int | None = None,
+        low_threshold: float | None = None,
+        high_threshold: float | None = None,
+    ) -> list[dict[str, Any]]:
+        if low_threshold is not None or high_threshold is not None:
+            raise ValueError("Threshold search is not supported by the ColBERT backend.")
+        if top_k is None:
+            raise ValueError("top_k is required for the ColBERT backend.")
+
+        query_text = _query_text(left_tuple)
+        return [
+            {
+                "metadata": [result["pid"], result["text"]],
+                "score": result["score"],
+            }
+            for result in self.wiki.search(query_text, topk=top_k)
+        ]
+
+    def clear_cp(self, cp_id: str) -> bool:
+        return False
+
+    def cache_state(self) -> dict[str, int]:
+        return {self.index_name: len(self.wiki.searcher.collection)}
+
+
 # -----------------------------
 # API Models
 # -----------------------------
@@ -159,7 +277,9 @@ class QueryRequest(BaseModel):
     cp_id: str
     left_tuple: list[Any]
     right_table: list[list[Any]] | None = None
-    top_k: int = Field(gt=0)
+    top_k: int | None = Field(default=None, gt=0)
+    low_threshold: float | None = None
+    high_threshold: float | None = None
 
 
 class ClearRequest(BaseModel):
@@ -171,19 +291,45 @@ class ClearRequest(BaseModel):
 # -----------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.vector_db = VectorDBService(
-        SentenceTransformersRM(app.state.model_name)
-    )
+    if app.state.backend == "colbert":
+        app.state.vector_db = ColBERTVectorDBService(
+            colbert_wiki_path=app.state.colbert_wiki_path,
+            index_name=app.state.colbert_index_name,
+            experiment_root=app.state.colbert_experiment_root,
+            experiment=app.state.colbert_experiment,
+            collection=app.state.colbert_collection,
+            colbert_root=app.state.colbert_root,
+        )
+    else:
+        app.state.vector_db = VectorDBService(
+            SentenceTransformersRM(app.state.model_name)
+        )
     yield
 
 
-def create_app(model_name: str = "intfloat/e5-base-v2") -> FastAPI:
+def create_app(
+    model_name: str = "intfloat/e5-base-v2",
+    backend: str = "faiss",
+    colbert_wiki_path: str = "/home/hojaeson_umass/projects/semops-experiments/pipelines/lotus",
+    colbert_index_name: str = "fever_factool_wikipedia_colbert",
+    colbert_experiment_root: str = "/home/hojaeson_umass/projects/semops-experiments/pipelines/lotus/logs/colbert_indexes",
+    colbert_experiment: str = "wikipedia",
+    colbert_collection: str = "/home/hojaeson_umass/projects/semops-experiments/pipelines/lotus/logs/colbert_indexes/collections/wikipedia.tsv",
+    colbert_root: str = "/home/hojaeson_umass/projects/semops-experiments/projects/ColBERT",
+) -> FastAPI:
     app = FastAPI(lifespan=lifespan)
     app.state.model_name = model_name
+    app.state.backend = backend
+    app.state.colbert_wiki_path = colbert_wiki_path
+    app.state.colbert_index_name = colbert_index_name
+    app.state.colbert_experiment_root = colbert_experiment_root
+    app.state.colbert_experiment = colbert_experiment
+    app.state.colbert_collection = colbert_collection
+    app.state.colbert_root = colbert_root
 
     @app.get("/health")
     async def health():
-        return {"status": "ok"}
+        return {"status": "ok", "backend": app.state.backend}
 
     @app.get("/cache")
     async def cache():
@@ -196,6 +342,12 @@ def create_app(model_name: str = "intfloat/e5-base-v2") -> FastAPI:
             vs = app.state.vector_db.build_index(request.cp_id, right_table)
         except ValueError as e:
             raise HTTPException(400, str(e))
+        if app.state.backend == "colbert":
+            return {
+                "rows_indexed": len(app.state.vector_db.wiki.searcher.collection),
+                "backend": "colbert",
+                "note": "Using prebuilt ColBERT index; right_table ignored.",
+            }
         return {"rows_indexed": vs.index.ntotal}
 
     @app.post("/query")
@@ -207,7 +359,9 @@ def create_app(model_name: str = "intfloat/e5-base-v2") -> FastAPI:
                 None if request.right_table is None else [
                     _normalize_tuple(r) for r in request.right_table
                 ],
-                request.top_k,
+                top_k=request.top_k,
+                low_threshold=request.low_threshold,
+                high_threshold=request.high_threshold,
             )
         except ValueError as e:
             raise HTTPException(400, str(e))
@@ -229,9 +383,37 @@ def main():
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--model-name", default="intfloat/e5-base-v2")
+    parser.add_argument("--backend", choices=("faiss", "colbert"), default="faiss")
+    parser.add_argument(
+        "--colbert-wiki-path",
+        default="/home/hojaeson_umass/projects/semops-experiments/pipelines/lotus",
+    )
+    parser.add_argument("--colbert-index-name", default="fever_factool_wikipedia_colbert")
+    parser.add_argument(
+        "--colbert-experiment-root",
+        default="/home/hojaeson_umass/projects/semops-experiments/pipelines/lotus/logs/colbert_indexes",
+    )
+    parser.add_argument("--colbert-experiment", default="wikipedia")
+    parser.add_argument(
+        "--colbert-collection",
+        default="/home/hojaeson_umass/projects/semops-experiments/pipelines/lotus/logs/colbert_indexes/collections/wikipedia.tsv",
+    )
+    parser.add_argument(
+        "--colbert-root",
+        default="/home/hojaeson_umass/projects/semops-experiments/projects/ColBERT",
+    )
     args = parser.parse_args()
 
-    app = create_app(args.model_name)
+    app = create_app(
+        model_name=args.model_name,
+        backend=args.backend,
+        colbert_wiki_path=args.colbert_wiki_path,
+        colbert_index_name=args.colbert_index_name,
+        colbert_experiment_root=args.colbert_experiment_root,
+        colbert_experiment=args.colbert_experiment,
+        colbert_collection=args.colbert_collection,
+        colbert_root=args.colbert_root,
+    )
     uvicorn.run(app, host=args.host, port=args.port)
 
 

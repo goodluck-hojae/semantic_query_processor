@@ -11,6 +11,7 @@ class OpName:
     SEM_AGG = "sem_agg"
     JOIN = "join"
     CARTESIAN_PRODUCT = "cp"
+    INDEXED_SEARCH = "indexed_search"
 
 
 OPERATOR_LIST = [
@@ -22,6 +23,7 @@ OPERATOR_LIST = [
     OpName.SEM_AGG,
     OpName.JOIN,
     OpName.CARTESIAN_PRODUCT,
+    OpName.INDEXED_SEARCH,
 ]
 
 

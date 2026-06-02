@@ -238,12 +238,26 @@ class SemanticPlan:
             args = node.get("args", {})
 
             if name == OpName.SEM_FILTER:
-                physical.append(
-                    ops.SemFilter(
-                        instruction=args["prompt"],
-                        position=idx
+                if args.get("cascade", False) or args.get("llm_cascade", False):
+                    physical.append(
+                        ops.CascadeOperator(
+                            instruction=args["prompt"],
+                            model_name=args.get("cascade_model"),
+                            api_base=args.get("cascade_api_base"),
+                            api_port=args.get("cascade_port"),
+                            max_tokens=args.get("cascade_max_tokens", 8),
+                            low_threshold=args.get("cascade_low_threshold", args.get("low_threshold")),
+                            high_threshold=args.get("cascade_high_threshold", args.get("high_threshold")),
+                            position=idx,
+                        )
                     )
-                )
+                else:
+                    physical.append(
+                        ops.SemFilter(
+                            instruction=args["prompt"],
+                            position=idx
+                        )
+                    )
 
             elif name == OpName.SEM_MAP:
                 physical.append(
@@ -280,8 +294,10 @@ class SemanticPlan:
 
             elif name == OpName.JOIN:
                 icp = args.get("icp", False)
-                right_table = list(
-                    data._data_source(None, args["right_table"], None)
+                right_table = (
+                    list(data._data_source(None, args["right_table"], None))
+                    if args.get("right_table") is not None
+                    else []
                 )
 
                 if icp is True:
@@ -294,6 +310,9 @@ class SemanticPlan:
                             ),
                             service_port=args.get("icp_port", 8000),
                             top_k=args.get("icp_top_k", 5),
+                            low_threshold=args.get("icp_low_threshold"),
+                            high_threshold=args.get("icp_high_threshold"),
+                            cp_id=args.get("icp_cp_id"),
                             position=idx,
                         )
                     )
@@ -305,17 +324,33 @@ class SemanticPlan:
                         )
                     )
 
-                physical.append(
-                    ops.SemFilter(
-                        instruction=args["instruction"],
-                        position=idx
+                if args.get("cascade", False) or args.get("llm_cascade", False):
+                    physical.append(
+                        ops.CascadeOperator(
+                            instruction=args["instruction"],
+                            model_name=args.get("cascade_model"),
+                            api_base=args.get("cascade_api_base"),
+                            api_port=args.get("cascade_port"),
+                            max_tokens=args.get("cascade_max_tokens", 8),
+                            low_threshold=args.get("cascade_low_threshold", args.get("low_threshold")),
+                            high_threshold=args.get("cascade_high_threshold", args.get("high_threshold")),
+                            position=idx,
+                        )
                     )
-                )
+                else:
+                    physical.append(
+                        ops.SemFilter(
+                            instruction=args["instruction"],
+                            position=idx
+                        )
+                    )
 
             elif name == OpName.CARTESIAN_PRODUCT:
                 icp = args.get("icp", False)
-                right_table = list(
-                    data._data_source(None, args["right_table"], None)
+                right_table = (
+                    list(data._data_source(None, args["right_table"], None))
+                    if args.get("right_table") is not None
+                    else []
                 )
 
                 if icp is True:
@@ -328,6 +363,9 @@ class SemanticPlan:
                             ),
                             service_port=args.get("icp_port", 8000),
                             top_k=args.get("icp_top_k", 5),
+                            low_threshold=args.get("icp_low_threshold"),
+                            high_threshold=args.get("icp_high_threshold"),
+                            cp_id=args.get("icp_cp_id"),
                             position=idx,
                         )
                     )
@@ -338,6 +376,28 @@ class SemanticPlan:
                             position=idx
                         )
                     )
+
+            elif name == OpName.INDEXED_SEARCH:
+                right_table = (
+                    list(data._data_source(None, args["right_table"], None))
+                    if args.get("right_table") is not None
+                    else []
+                )
+                physical.append(
+                    ops.IndexedSearch(
+                        right_table=right_table,
+                        service_address=args.get(
+                            "icp_address",
+                            "127.0.0.1",
+                        ),
+                        service_port=args.get("icp_port", 8000),
+                        top_k=args.get("icp_top_k", 5),
+                        low_threshold=args.get("icp_low_threshold"),
+                        high_threshold=args.get("icp_high_threshold"),
+                        cp_id=args.get("icp_cp_id"),
+                        position=idx,
+                    )
+                )
 
             else:
                 raise ValueError(f"Unknown op: {name}")

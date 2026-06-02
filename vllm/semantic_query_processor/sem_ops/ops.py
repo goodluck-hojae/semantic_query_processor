@@ -1,5 +1,6 @@
 import asyncio
-
+import math
+import os
 from .base import BaseOp, OpKind, OpName
 from vllm.semantic_query_processor.context import (
     RETRY_TASK,
@@ -10,7 +11,7 @@ from vllm.semantic_query_processor.context import (
 from vllm.semantic_query_processor.budget import KVMemoryManager
 from vllm.semantic_query_processor.execution.pipeline_execution import BlockingExecutor
 from vllm.semantic_query_processor.controller.map_estimator import MapRatioEstimator
-from .prompt_utils import get_prompt, get_system_prompt, add_assistant_prompt
+from .prompt_utils import get_prompt, get_system_prompt, add_assistant_prompt, get_data_prompt
 import requests
 from typing import Any, List
 
@@ -80,12 +81,7 @@ class SemFilter(BaseOp):
             passed = False
         else:
             passed = True
-
-        # if SemFilter.TRUE in verdict:
-        #     passed = True
-        # else:
-        #     passed = False
-
+            
         if self.negate:
             passed = not passed
             
@@ -109,7 +105,7 @@ class SemFilter(BaseOp):
     
 
 class SemMap(BaseOp):
-    MAX_TOKEN_LIMIT = 4096
+    MAX_TOKEN_LIMIT = 8192
     LOG = False
     LOG_RETRY_TRACE = True
     def __init__(
@@ -241,7 +237,7 @@ class SemMap(BaseOp):
 
         return ctx
 
- 
+
 class CartesianProduct(BaseOp):
     def __init__(self, right_table, position=-1):
         super().__init__(kind=OpKind.JOIN, position=position)
@@ -267,115 +263,32 @@ class CartesianProduct(BaseOp):
             out.append(new_ctx)
         return out
 
-
-# class IndexedCartesianProduct(BaseOp):
-#     def __init__(
-#         self,
-#         right_table,
-#         service_address="127.0.0.1",
-#         service_port=8080,
-#         top_k=5,
-#         position=-1,
-#     ):
-#         super().__init__(kind=OpKind.JOIN, position=position)
-#         self.right_table = right_table
-#         self.service_address = service_address
-#         self.service_port = service_port
-#         self.top_k = top_k
-#         self._indexed_rows = [
-#             (idx, right.input.data)
-#             for idx, right in enumerate(self.right_table)
-#         ]
-#         self.cp_id = f"icp:{position}:{id(self)}"
-
-#     def _post_icp(self, path, payload):
-#         return requests.post(
-#             f"http://{self.service_address}:{self.service_port}/{path}",
-#             json=payload,
-#             timeout=60,
-#         )
-
-#     def _build_remote_index(self) -> None:
-#         response = self._post_icp(
-#             "build_index",
-#             {
-#                 "cp_id": self.cp_id,
-#                 "right_table": [list(row) for row in self._indexed_rows],
-#             },
-#         )
-#         response.raise_for_status()
-
-#     def _query_retrieval(self, left_row: tuple[Any, ...]) -> list[dict[str, Any]]:
-#         payload = {
-#             "cp_id": self.cp_id,
-#             "left_tuple": list(left_row),
-#             "top_k": self.top_k,
-#         }
-
-#         response = self._post_icp("query", payload)
-#         if response.ok:
-#             return response.json()["results"]
-        
-#         self._build_remote_index()
-
-#         retry_response = self._post_icp("query", payload)
-#         retry_response.raise_for_status()
-#         return retry_response.json()["results"]
-
-#     def __call__(self, ctx):
-#         if not self.right_table:
-#             return []
-
-#         left_row = (ctx.state.idx, ctx.input.data)
-#         try:
-#             ranked_rows = self._query_retrieval(left_row)
-#         except requests.RequestException:
-#             ranked_rows = [
-#                 {"metadata": [idx], "score": 0.0}
-#                 for idx in range(len(self.right_table))
-#             ]
-
-#         out = []
-#         for row in ranked_rows:
-#             metadata = row["metadata"]
-#             right_idx = int(metadata[0])
-#             right = self.right_table[right_idx]
-#             base_input = SemanticInput(
-#                 data=ctx.input.data[:],
-#                 right_data=[],
-#             )
-#             _input = base_input.add_right(right.input.data)
-#             new_ctx = SemContext(
-#                 input=_input,
-#                 state=ExecutionState(
-#                     raw_request=ctx.state.raw_request,
-#                     pin_req_id=None,
-#                     executor=ctx.state.executor,
-#                 ),
-#             )
-#             out.append(new_ctx)
-
-#         return out
+ 
 
 class IndexedCartesianProduct(BaseOp):
     def __init__(
         self,
-        right_table,
+        right_table=None,
         service_address="127.0.0.1",
         service_port=8080,
         top_k=5,
+        low_threshold=None,
+        high_threshold=None,
+        cp_id=None,
         position=-1,
     ):
         super().__init__(kind=OpKind.JOIN, position=position)
-        self.right_table = right_table
+        self.right_table = right_table or []
         self.service_address = service_address
         self.service_port = service_port
         self.top_k = top_k
+        self.low_threshold = low_threshold
+        self.high_threshold = high_threshold
         self._indexed_rows = [
             (idx, right.input.data)
             for idx, right in enumerate(self.right_table)
         ]
-        self.cp_id = f"icp:{position}:{id(self)}"
+        self.cp_id = cp_id or f"icp:{position}:{id(self)}"
 
     def _post_icp(self, path, payload):
         return requests.post(
@@ -385,6 +298,8 @@ class IndexedCartesianProduct(BaseOp):
         )
 
     def _build_remote_index(self) -> None:
+        if not self.right_table:
+            return
         response = self._post_icp(
             "build_index",
             {
@@ -398,8 +313,12 @@ class IndexedCartesianProduct(BaseOp):
         payload = {
             "cp_id": self.cp_id,
             "left_tuple": list(left_row),
-            "top_k": self.top_k,
         }
+        if self.low_threshold is not None or self.high_threshold is not None:
+            payload["low_threshold"] = self.low_threshold
+            payload["high_threshold"] = self.high_threshold
+        else:
+            payload["top_k"] = self.top_k
 
         response = self._post_icp("query", payload)
         if response.ok:
@@ -411,14 +330,24 @@ class IndexedCartesianProduct(BaseOp):
         retry_response.raise_for_status()
         return retry_response.json()["results"]
 
-    def __call__(self, ctx):
-        if not self.right_table:
-            return []
+    def _query_text_from_data(self, data):
+        for message in reversed(data):
+            if not isinstance(message, dict):
+                continue
+            content = str(message.get("content", "")).strip()
+            if content:
+                return content
+        return str(data).strip()
 
-        left_row = (ctx.state.idx, ctx.input.data)
+    def __call__(self, ctx):
+        query_data = self._query_text_from_data(ctx.input.data)
+
+        left_row = (query_data,)
         try:
             ranked_rows = self._query_retrieval(left_row)
         except requests.RequestException:
+            if not self.right_table:
+                raise
             ranked_rows = [
                 {"metadata": [idx], "score": 0.0}
                 for idx in range(len(self.right_table))
@@ -426,25 +355,371 @@ class IndexedCartesianProduct(BaseOp):
 
         out = []
         for row in ranked_rows:
-            metadata = row["metadata"]
-            right_idx = int(metadata[0])
-            right = self.right_table[right_idx]
+            _id, data = row["metadata"][0], row["metadata"][1]
+            right_data = get_data_prompt(data)
             base_input = SemanticInput(
                 data=ctx.input.data[:],
                 right_data=[],
             )
-            _input = base_input.add_right(right.input.data)
+            _input = base_input.add_right(right_data)
             new_ctx = SemContext(
                 input=_input,
                 state=ExecutionState(
                     raw_request=ctx.state.raw_request,
                     pin_req_id=None,
                     executor=ctx.state.executor,
+                    idx=ctx.state.idx,
                 ),
             )
             out.append(new_ctx)
 
         return out
+
+
+class IndexedSearch(BaseOp):
+    def __init__(
+        self,
+        right_table=None,
+        service_address="127.0.0.1",
+        service_port=8080,
+        top_k=5,
+        low_threshold=None,
+        high_threshold=None,
+        cp_id=None,
+        position=-1,
+    ):
+        super().__init__(kind=OpKind.TUPLE_INDEPENDENT, position=position)
+        self.right_table = right_table or []
+        self.service_address = service_address
+        self.service_port = service_port
+        self.top_k = top_k
+        self.low_threshold = low_threshold
+        self.high_threshold = high_threshold
+        self._indexed_rows = [
+            (idx, right.input.data)
+            for idx, right in enumerate(self.right_table)
+        ]
+        self.cp_id = cp_id or f"icp:{position}:{id(self)}"
+
+    def _post_icp(self, path, payload):
+        return requests.post(
+            f"http://{self.service_address}:{self.service_port}/{path}",
+            json=payload,
+            timeout=60,
+        )
+
+    def _build_remote_index(self) -> None:
+        if not self.right_table:
+            return
+        response = self._post_icp(
+            "build_index",
+            {
+                "cp_id": self.cp_id,
+                "right_table": [list(row) for row in self._indexed_rows],
+            },
+        )
+        response.raise_for_status()
+
+    def _query_retrieval(self, left_row: tuple[Any, ...]) -> list[dict[str, Any]]:
+        payload = {
+            "cp_id": self.cp_id,
+            "left_tuple": list(left_row),
+        }
+        if self.low_threshold is not None or self.high_threshold is not None:
+            payload["low_threshold"] = self.low_threshold
+            payload["high_threshold"] = self.high_threshold
+        else:
+            payload["top_k"] = self.top_k
+
+        response = self._post_icp("query", payload)
+        if response.ok:
+            return response.json()["results"]
+
+        self._build_remote_index()
+
+        retry_response = self._post_icp("query", payload)
+        retry_response.raise_for_status()
+        return retry_response.json()["results"]
+
+    def _query_text_from_data(self, data):
+        for message in reversed(data):
+            if not isinstance(message, dict):
+                continue
+            content = str(message.get("content", "")).strip()
+            if content:
+                return content
+        return str(data).strip()
+
+    def estimate_tokens(self, ctx):
+        return max(
+            1,
+            KVMemoryManager.get_instance().token_length(
+                self._query_text_from_data(ctx.input.data)
+            ),
+        )
+
+    async def __call__(self, ctx, priority: int = 0):
+        query_data = self._query_text_from_data(ctx.input.data)
+        ranked_rows = await asyncio.to_thread(
+            self._query_retrieval,
+            (query_data,),
+        )
+
+        retrieved_contexts = []
+        for rank, row in enumerate(ranked_rows, start=1):
+            metadata = row.get("metadata", [])
+            if len(metadata) < 2:
+                continue
+            doc_id, text = metadata[0], metadata[1]
+            retrieved_contexts.append(
+                f"[{rank}] Document ID: {doc_id}\n{text}"
+            )
+
+        if not retrieved_contexts:
+            return ctx
+
+        retrieved_data = get_data_prompt("\n\n".join(retrieved_contexts))
+        ctx.input.data += retrieved_data
+        ctx.output.append({
+            str(self.__class__): {
+                "num_retrieved": len(retrieved_contexts),
+                "cp_id": self.cp_id,
+            }
+        })
+
+        return ctx
+
+
+
+
+class CascadeOperator(BaseOp):
+    TRUE = 'true'
+    FALSE = 'false'
+    LOG = False
+
+    def __init__(
+        self,
+        instruction,
+        negate=False,
+        pin=False,
+        unpin=False,
+        model_name=None,
+        api_base=None,
+        api_port=None,
+        max_tokens=8,
+        temperature=0,
+        seed=42,
+        low_threshold=None,
+        high_threshold=None,
+        position=-1,
+    ):
+        super().__init__(kind=OpKind.TUPLE_INDEPENDENT, position=position)
+        self.instruction = instruction
+        self.negate = negate
+        self.pin = pin
+        self.unpin = unpin
+        self.model_name = (
+            model_name
+            or os.environ.get("SEMOPS_CASCADE_MODEL")
+            or os.environ.get("SEMOPS_ICP_VLLM_MODEL")
+            or "meta-llama/Llama-3.1-8B-Instruct"
+        )
+        self.api_base = (
+            api_base
+            or os.environ.get("SEMOPS_CASCADE_API_BASE")
+            or os.environ.get("SEMOPS_ICP_VLLM_API_BASE")
+            or os.environ.get("VLLM_8B_API_BASE")
+            or (
+                f"http://localhost:{api_port}/v1"
+                if api_port is not None
+                else "http://localhost:8004/v1"
+            )
+        )
+        self.max_tokens = max_tokens
+        self.temperature = temperature
+        self.seed = seed
+        self.low_threshold = low_threshold
+        self.high_threshold = high_threshold
+        if (self.low_threshold is None) != (self.high_threshold is None):
+            raise ValueError("low_threshold and high_threshold must be provided together.")
+        if (
+            self.low_threshold is not None
+            and self.high_threshold is not None
+            and self.low_threshold > self.high_threshold
+        ):
+            raise ValueError("low_threshold must be <= high_threshold.")
+
+    def _build_prompts(self, ctx):
+        if ctx.input.right_data:
+            joined_data = ctx.input.data + ctx.input.right_data
+            data_prompt = joined_data if 'system' in joined_data[0]['role'] else get_system_prompt() + joined_data
+            full_prompt = get_prompt(self.instruction, joined_data, op=OpName.SEM_JOIN)
+        else:
+            data_prompt = ctx.input.data if 'system' in ctx.input.data[0]['role'] else get_system_prompt() + ctx.input.data
+            full_prompt = get_prompt(self.instruction, ctx.input.data, op=OpName.SEM_FILTER)
+        return data_prompt, full_prompt
+
+    def estimate_tokens(self, ctx):
+        _, prompt = self._build_prompts(ctx)
+        prompt_str = KVMemoryManager.get_instance().apply_chat_template(prompt)
+        prompt_token_len = KVMemoryManager.get_instance().token_length(prompt_str)
+        return prompt_token_len + self.max_tokens
+
+    @staticmethod
+    def _get_attr_or_key(obj, key, default=None):
+        if isinstance(obj, dict):
+            return obj.get(key, default)
+        return getattr(obj, key, default)
+
+    @classmethod
+    def _normalize_logprob_token(cls, token):
+        if token is None:
+            return ""
+        return str(token).replace("Ġ", " ").replace("▁", " ").strip().lower()
+
+    @classmethod
+    def _extract_first_token_probs(cls, response):
+        choices = cls._get_attr_or_key(response, "choices", [])
+        if not choices:
+            return None
+
+        choice = choices[0]
+        logprobs = cls._get_attr_or_key(choice, "logprobs")
+        if logprobs is None:
+            return None
+
+        content = cls._get_attr_or_key(logprobs, "content")
+        if not content:
+            return None
+
+        first = content[0]
+        top_logprobs = cls._get_attr_or_key(first, "top_logprobs", []) or []
+        token_logprobs = list(top_logprobs)
+        if cls._get_attr_or_key(first, "token") is not None:
+            token_logprobs.append(first)
+
+        probs = {}
+        top_token = cls._normalize_logprob_token(cls._get_attr_or_key(first, "token"))
+        top_logprob = cls._get_attr_or_key(first, "logprob")
+        for item in token_logprobs:
+            token = cls._normalize_logprob_token(cls._get_attr_or_key(item, "token"))
+            logprob = cls._get_attr_or_key(item, "logprob")
+            if token in (cls.TRUE, cls.FALSE) and logprob is not None:
+                probs[token] = max(probs.get(token, 0.0), math.exp(logprob))
+
+        return {
+            "top_token": top_token,
+            "top_prob": math.exp(top_logprob) if top_logprob is not None else None,
+            "true_prob": probs.get(cls.TRUE, 0.0),
+            "false_prob": probs.get(cls.FALSE, 0.0),
+        }
+
+    def _call_vllm(self, messages):
+        try:
+            import litellm
+        except ImportError as exc:
+            raise RuntimeError(
+                "CascadeOperator requires litellm in this environment."
+            ) from exc
+
+        use_thresholds = self.low_threshold is not None and self.high_threshold is not None
+        completion_kwargs = {
+            "model": f"hosted_vllm/{self.model_name}",
+            "messages": messages,
+            "api_base": self.api_base,
+            "max_tokens": self.max_tokens,
+            "temperature": self.temperature,
+            "seed": self.seed,
+        }
+        if use_thresholds:
+            completion_kwargs.update({
+                "logprobs": True,
+                "top_logprobs": 20,
+            })
+
+        response = litellm.completion(**completion_kwargs)
+        if not response.choices:
+            return "", None
+
+        choice = response.choices[0]
+        message = self._get_attr_or_key(choice, "message", {})
+        content = self._get_attr_or_key(message, "content", "") or ""
+        return content, self._extract_first_token_probs(response) if use_thresholds else None
+
+    async def _fallback_to_main_executor(self, ctx, prompt, priority):
+        output = await ctx.state.executor.execute(
+            raw_request=ctx.state.raw_request,
+            prompt=prompt,
+            max_tokens=self.max_tokens,
+            pin=self.pin,
+            priority=priority,
+        )
+        if self.pin:
+            ctx.state.pin_req_id = output.request_id
+        return output.text.strip().lower(), "main"
+
+    def _resolve_with_thresholds(self, helper_probs):
+        if self.low_threshold is None or self.high_threshold is None:
+            return None
+        if helper_probs is None:
+            return None
+
+        top_token = helper_probs["top_token"]
+        if top_token not in (self.TRUE, self.FALSE):
+            return None
+
+        true_prob = helper_probs["true_prob"]
+        if true_prob >= self.high_threshold:
+            return True, true_prob
+        if true_prob <= self.low_threshold:
+            return False, true_prob
+        return None
+
+    async def __call__(self, ctx: SemContext, priority: int = 0):
+        _, prompt = self._build_prompts(ctx)
+        output_text, helper_probs = await asyncio.to_thread(self._call_vllm, prompt)
+        verdict = output_text.strip().lower()
+
+        if self.low_threshold is None and self.high_threshold is None:
+            passed = self.FALSE not in verdict
+            resolved_by = "helper"
+            positive_prob = None
+        else:
+            resolved = self._resolve_with_thresholds(helper_probs)
+            if resolved is None:
+                verdict, resolved_by = await self._fallback_to_main_executor(ctx, prompt, priority)
+                passed = self.FALSE not in verdict
+                positive_prob = None
+            else:
+                passed, positive_prob = resolved
+                resolved_by = "helper"
+
+        ctx.input.data = prompt[:-1]
+        if bool(ctx.input.right_data):
+            ctx.input.right_data = []
+
+        if self.negate:
+            passed = not passed
+
+        ctx.output.append({
+            str(self.__class__): verdict,
+            "cascade_resolved_by": resolved_by,
+            "cascade_positive_prob": positive_prob,
+        })
+
+        if self.LOG:
+            print(
+                "[cascade-op] "
+                f"model={self.model_name} api_base={self.api_base} "
+                f"verdict={verdict!r} resolved_by={resolved_by} "
+                f"positive_prob={positive_prob}"
+            )
+
+        if self.unpin and ctx.state.pin_req_id is not None:
+            await ctx.state.executor.unpin(ctx.state.raw_request, ctx.state.pin_req_id)
+            ctx.state.pin_req_id = None
+
+        return passed
 
 
 class SemClassify(BaseOp):
