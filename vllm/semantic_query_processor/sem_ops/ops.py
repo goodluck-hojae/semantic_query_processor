@@ -495,7 +495,8 @@ class IndexedSearch(BaseOp):
 class CascadeOperator(BaseOp):
     TRUE = 'true'
     FALSE = 'false'
-    LOG = False
+    LOG = True
+    delegate_to_main_count = 0
 
     def __init__(
         self,
@@ -607,11 +608,18 @@ class CascadeOperator(BaseOp):
             if token in (cls.TRUE, cls.FALSE) and logprob is not None:
                 probs[token] = max(probs.get(token, 0.0), math.exp(logprob))
 
+        true_prob = probs.get(cls.TRUE, 0.0)
+        false_prob = probs.get(cls.FALSE, 0.0)
+        if true_prob > 0.0 and false_prob > 0.0:
+            normalized_true_prob = true_prob / (true_prob + false_prob)
+        else:
+            normalized_true_prob = true_prob
+
         return {
             "top_token": top_token,
             "top_prob": math.exp(top_logprob) if top_logprob is not None else None,
-            "true_prob": probs.get(cls.TRUE, 0.0),
-            "false_prob": probs.get(cls.FALSE, 0.0),
+            "true_prob": normalized_true_prob,
+            "false_prob": false_prob,
         }
 
     def _call_vllm(self, messages):
@@ -647,6 +655,7 @@ class CascadeOperator(BaseOp):
         return content, self._extract_first_token_probs(response) if use_thresholds else None
 
     async def _fallback_to_main_executor(self, ctx, prompt, priority):
+        type(self).delegate_to_main_count += 1
         output = await ctx.state.executor.execute(
             raw_request=ctx.state.raw_request,
             prompt=prompt,
@@ -673,7 +682,7 @@ class CascadeOperator(BaseOp):
             return True, true_prob
         if true_prob <= self.low_threshold:
             return False, true_prob
-        return None
+        return None, true_prob
 
     async def __call__(self, ctx: SemContext, priority: int = 0):
         _, prompt = self._build_prompts(ctx)
@@ -686,13 +695,23 @@ class CascadeOperator(BaseOp):
             positive_prob = None
         else:
             resolved = self._resolve_with_thresholds(helper_probs)
-            if resolved is None:
+            print(resolved)
+            if resolved[0] is None:
                 verdict, resolved_by = await self._fallback_to_main_executor(ctx, prompt, priority)
                 passed = self.FALSE not in verdict
-                positive_prob = None
+                passed, positive_prob = resolved
             else:
                 passed, positive_prob = resolved
                 resolved_by = "helper"
+
+            
+            if self.LOG:
+                print(
+                    "[cascade-op] "
+                    f"model={self.model_name}"
+                    f"verdict={verdict!r} resolved_by={resolved_by} "
+                    f"positive_prob={positive_prob}"
+                )
 
         ctx.input.data = prompt[:-1]
         if bool(ctx.input.right_data):
@@ -705,15 +724,8 @@ class CascadeOperator(BaseOp):
             str(self.__class__): verdict,
             "cascade_resolved_by": resolved_by,
             "cascade_positive_prob": positive_prob,
+            "cascade_delegate_to_main_count": type(self).delegate_to_main_count,
         })
-
-        if self.LOG:
-            print(
-                "[cascade-op] "
-                f"model={self.model_name} api_base={self.api_base} "
-                f"verdict={verdict!r} resolved_by={resolved_by} "
-                f"positive_prob={positive_prob}"
-            )
 
         if self.unpin and ctx.state.pin_req_id is not None:
             await ctx.state.executor.unpin(ctx.state.raw_request, ctx.state.pin_req_id)
