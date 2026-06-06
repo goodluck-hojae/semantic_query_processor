@@ -62,6 +62,23 @@ class SemanticPlan:
             stage_min_caps = {}
             estimated_ctxs = list(ctxs)
 
+            def estimate_fanout_ctxs(fanout_op, input_ctxs):
+                if isinstance(fanout_op, ops.IndexedCartesianProduct):
+                    cp_limit = fanout_op.top_k if fanout_op.top_k is not None else len(fanout_op.right_table)
+                    approx_cp = ops.CartesianProduct(
+                        right_table=fanout_op.right_table[:cp_limit],
+                        position=fanout_op.position,
+                    )
+                    next_ctxs = []
+                    for ctx in input_ctxs:
+                        next_ctxs.extend(approx_cp(ctx) or [])
+                    return next_ctxs
+
+                next_ctxs = []
+                for ctx in input_ctxs:
+                    next_ctxs.extend(fanout_op(ctx) or [])
+                return next_ctxs
+
             for stage in current_segment:
                 sampled_ctxs = estimated_ctxs
                 if len(estimated_ctxs) > self.ESTIMATED_CTX_SAMPLE_SIZE:
@@ -77,10 +94,10 @@ class SemanticPlan:
                     stage_min_caps[stage.stage_id] = max(budgets)
 
                 if stage.fanout_op is not None:
-                    next_ctxs = []
-                    for ctx in estimated_ctxs:
-                        next_ctxs.extend(stage.fanout_op(ctx) or [])
-                    estimated_ctxs = next_ctxs
+                    estimated_ctxs = estimate_fanout_ctxs(
+                        stage.fanout_op,
+                        estimated_ctxs,
+                    )
 
             if num_stages == 1:
                 kv.register_stage(
@@ -294,6 +311,7 @@ class SemanticPlan:
 
             elif name == OpName.JOIN:
                 icp = args.get("icp", False)
+                icp_oracle_fallback = args.get("icp_oracle_fallback", False)
                 right_table = (
                     list(data._data_source(None, args["right_table"], None))
                     if args.get("right_table") is not None
@@ -337,6 +355,29 @@ class SemanticPlan:
                             position=idx,
                         )
                     )
+                elif (
+                    icp is True
+                    and args.get("icp_low_threshold") is not None
+                    and args.get("icp_high_threshold") is not None
+                ):
+                    oracle_instruction = (
+                        args.get("icp_oracle_instruction")
+                        or args.get("instruction")
+                    )
+                    if not oracle_instruction:
+                        raise ValueError(
+                            "ICP join filtering requires instruction or "
+                            "icp_oracle_instruction."
+                        )
+                    physical.append(
+                        ops.ICPFilter(
+                            instruction=oracle_instruction,
+                            low_threshold=args.get("icp_low_threshold"),
+                            high_threshold=args.get("icp_high_threshold"),
+                            max_tokens=args.get("icp_oracle_max_tokens", 8),
+                            position=idx,
+                        )
+                    )
                 else:
                     physical.append(
                         ops.SemFilter(
@@ -347,6 +388,7 @@ class SemanticPlan:
 
             elif name == OpName.CARTESIAN_PRODUCT:
                 icp = args.get("icp", False)
+                icp_oracle_fallback = args.get("icp_oracle_fallback", False)
                 right_table = (
                     list(data._data_source(None, args["right_table"], None))
                     if args.get("right_table") is not None
@@ -374,6 +416,26 @@ class SemanticPlan:
                         ops.CartesianProduct(
                             right_table=right_table,
                             position=idx
+                        )
+                    )
+
+                if icp_oracle_fallback:
+                    oracle_instruction = (
+                        args.get("icp_oracle_instruction")
+                        or args.get("instruction")
+                    )
+                    if not oracle_instruction:
+                        raise ValueError(
+                            "icp_oracle_fallback requires icp_oracle_instruction "
+                            "or instruction for a follow-up SemFilter."
+                        )
+                    physical.append(
+                        ops.ICPFilter(
+                            instruction=oracle_instruction,
+                            low_threshold=args.get("icp_low_threshold"),
+                            high_threshold=args.get("icp_high_threshold"),
+                            max_tokens=args.get("icp_oracle_max_tokens", 8),
+                            position=idx,
                         )
                     )
 

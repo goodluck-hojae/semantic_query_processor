@@ -40,6 +40,7 @@ class ExecutionState:
     pin_req_id: Any = None
     executor: LLMExecutor = None
     predicate: bool = True
+    helper_score: float | None = None
     idx: int = -1
     stage_id: int = -1
     retry_op_position: int = -1

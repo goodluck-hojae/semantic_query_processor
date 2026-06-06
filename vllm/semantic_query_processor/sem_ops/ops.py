@@ -49,7 +49,7 @@ class SemFilter(BaseOp):
         return prompt_token_len + self.max_tokens
 
 
-    async def __call__(self, ctx: SemContext, priority: int = 0):
+    async def _run_single(self, ctx: SemContext, priority: int = 0):
         data_part, prompt = self._build_prompts(ctx)
 
         # Data part is only required to bin
@@ -102,6 +102,102 @@ class SemFilter(BaseOp):
             ctx.state.pin_req_id = None
 
         return passed
+
+    async def _run_blocking(self, ctxs: List[SemContext]) -> List[SemContext]:
+        parent = self
+
+        def build_task(ctx: SemContext):
+            class FilterTask:
+                def __init__(self):
+                    self.ctx = ctx
+                    self.budget = (
+                        parent.estimate_tokens(ctx)
+                        * KVMemoryManager.get_instance().bytes_per_token
+                    )
+
+                async def __call__(self):
+                    passed = await parent._run_single(self.ctx)
+                    return self.ctx if passed else None
+
+            return FilterTask()
+
+        results = await BlockingExecutor.execute_tasks(
+            seeds=ctxs,
+            task_builder=build_task,
+        )
+        return [ctx for ctx in results if ctx is not None]
+
+    async def __call__(self, ctx: SemContext | List[SemContext], priority: int = 0):
+        if isinstance(ctx, list):
+            return await self._run_blocking(ctx)
+        return await self._run_single(ctx, priority=priority)
+
+
+class ICPFilter(BaseOp):
+    LOG = False
+
+    def __init__(
+        self,
+        instruction,
+        low_threshold,
+        high_threshold,
+        max_tokens=8,
+        position=-1,
+    ):
+        super().__init__(kind=OpKind.TUPLE_INDEPENDENT, position=position)
+        if low_threshold is None or high_threshold is None:
+            raise ValueError("ICPFilter requires both low_threshold and high_threshold.")
+        if low_threshold > high_threshold:
+            raise ValueError("ICPFilter requires low_threshold <= high_threshold.")
+        self.instruction = instruction
+        self.low_threshold = low_threshold
+        self.high_threshold = high_threshold
+        self.max_tokens = max_tokens
+        self.oracle_filter = SemFilter(
+            instruction=instruction,
+            max_tokens=max_tokens,
+            position=position,
+        )
+
+    def estimate_tokens(self, ctx):
+        score = ctx.state.helper_score
+        if score is not None and (
+            score >= self.high_threshold or score <= self.low_threshold
+        ):
+            return 1
+        return self.oracle_filter.estimate_tokens(ctx)
+
+    async def __call__(self, ctx: SemContext, priority: int = 0):
+        score = ctx.state.helper_score
+        if score is None:
+            raise ValueError("ICPFilter expected helper_score on context state.")
+
+        if score >= self.high_threshold:
+            ctx.output.append({
+                str(self.__class__): {
+                    "resolved_by": "icp_helper_positive",
+                    "score": score,
+                }
+            })
+            return True
+
+        if score <= self.low_threshold:
+            ctx.output.append({
+                str(self.__class__): {
+                    "resolved_by": "icp_helper_negative",
+                    "score": score,
+                }
+            })
+            return False
+
+        passed = await self.oracle_filter(ctx, priority=priority)
+        ctx.output.append({
+            str(self.__class__): {
+                "resolved_by": "icp_oracle_fallback",
+                "score": score,
+            }
+        })
+        return passed
     
 
 class SemMap(BaseOp):
@@ -152,8 +248,7 @@ class SemMap(BaseOp):
         return prompt_token_len + self.max_tokens
     
     
-    async def __call__(self, ctx: SemContext, priority: int = 0):
-        
+    async def _run_single(self, ctx: SemContext, priority: int = 0):
         executor = ctx.state.executor
         raw_request = ctx.state.raw_request
         previous_pin_req_id = ctx.state.pin_req_id if self.pin else None
@@ -236,6 +331,39 @@ class SemMap(BaseOp):
             ctx.state.pin_req_id = None
 
         return ctx
+
+    async def _run_blocking_single(self, ctx: SemContext) -> SemContext:
+        while True:
+            result = await self._run_single(ctx)
+            if result is not RETRY_TASK:
+                return result
+
+    async def _run_blocking(self, ctxs: List[SemContext]) -> List[SemContext]:
+        parent = self
+
+        def build_task(ctx: SemContext):
+            class MapTask:
+                def __init__(self):
+                    self.ctx = ctx
+                    self.budget = (
+                        parent.estimate_tokens(ctx)
+                        * KVMemoryManager.get_instance().bytes_per_token
+                    )
+
+                async def __call__(self):
+                    return await parent._run_blocking_single(self.ctx)
+
+            return MapTask()
+
+        return await BlockingExecutor.execute_tasks(
+            seeds=ctxs,
+            task_builder=build_task,
+        )
+
+    async def __call__(self, ctx: SemContext | List[SemContext], priority: int = 0):
+        if isinstance(ctx, list):
+            return await self._run_blocking(ctx)
+        return await self._run_single(ctx, priority=priority)
 
 
 class CartesianProduct(BaseOp):
@@ -349,13 +477,17 @@ class IndexedCartesianProduct(BaseOp):
             if not self.right_table:
                 raise
             ranked_rows = [
-                {"metadata": [idx], "score": 0.0}
-                for idx in range(len(self.right_table))
+                {"metadata": [idx, right.input.data], "score": 0.0}
+                for idx, right in enumerate(self.right_table)
             ]
 
         out = []
         for row in ranked_rows:
-            _id, data = row["metadata"][0], row["metadata"][1]
+            metadata = row.get("metadata", [])
+            if len(metadata) < 2:
+                continue
+            _id, data = metadata[0], metadata[1]
+            score = row.get("score")
             right_data = get_data_prompt(data)
             base_input = SemanticInput(
                 data=ctx.input.data[:],
@@ -368,6 +500,7 @@ class IndexedCartesianProduct(BaseOp):
                     raw_request=ctx.state.raw_request,
                     pin_req_id=None,
                     executor=ctx.state.executor,
+                    helper_score=score,
                     idx=ctx.state.idx,
                 ),
             )

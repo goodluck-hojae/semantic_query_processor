@@ -1,5 +1,6 @@
 import argparse
 import os
+import re
 import sys
 from contextlib import asynccontextmanager
 from typing import Any
@@ -16,15 +17,46 @@ def _normalize_tuple(values: list[Any] | tuple[Any, ...]) -> tuple[Any, ...]:
     return tuple(values)
 
 
+_CONTEXT_TEXT_RE = re.compile(r'"text":\s*(.+?)(?:\n|$)', re.DOTALL)
+
+
+def _extract_text_value(value: Any) -> str:
+    if value is None:
+        return ""
+
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return ""
+        match = _CONTEXT_TEXT_RE.search(text)
+        if match:
+            return match.group(1).strip().rstrip(",").strip().strip('"')
+        return text
+
+    if isinstance(value, dict):
+        if "text" in value:
+            return _extract_text_value(value["text"])
+        if "content" in value:
+            return _extract_text_value(value["content"])
+        return " ".join(filter(None, (_extract_text_value(v) for v in value.values())))
+
+    if isinstance(value, (list, tuple)):
+        return " ".join(filter(None, (_extract_text_value(item) for item in value)))
+
+    return str(value)
+
+
 def _serialize_tuple(t: tuple[Any, ...]) -> str:
-    return " ".join(map(str, t))
+    if len(t) == 2 and isinstance(t[0], int):
+        return _extract_text_value(t[1])
+    return " ".join(filter(None, (_extract_text_value(value) for value in t)))
 
 
 def _query_text(left_tuple: tuple[Any, ...]) -> str:
     if len(left_tuple) == 1:
-        return str(left_tuple[0])
+        return _extract_text_value(left_tuple[0])
     if len(left_tuple) == 2:
-        return str(left_tuple[1])
+        return _extract_text_value(left_tuple[1])
     return _serialize_tuple(left_tuple)
 
 
