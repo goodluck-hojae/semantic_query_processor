@@ -1,7 +1,7 @@
 import asyncio
 import math
 import os
-from .base import BaseOp, OpKind, OpName
+from .base import BaseOp, OpBehavior, OpName
 from vllm.semantic_query_processor.context import (
     RETRY_TASK,
     ExecutionState,
@@ -22,8 +22,21 @@ class SemFilter(BaseOp):
     FALSE = 'false'
     LOG = False
 
-    def __init__(self, instruction, negate=False, pin=False, unpin=False, max_tokens=8, position=-1):
-        super().__init__(kind=OpKind.TUPLE_INDEPENDENT, position=position)
+    def __init__(
+        self,
+        instruction,
+        negate=False,
+        pin=False,
+        unpin=False,
+        max_tokens=8,
+        position=-1,
+        predicate=True,
+    ):
+        super().__init__(
+            behavior=OpBehavior.TUPLE_INDEPENDENT,
+            position=position,
+            predicate=predicate,
+        )
         self.instruction = instruction
         self.negate = negate
         self.pin = pin
@@ -77,31 +90,11 @@ class SemFilter(BaseOp):
         if bool(ctx.input.right_data):
             ctx.input.right_data = []
 
-        if SemFilter.FALSE in verdict:
-            passed = False
-        else:
-            passed = True
-            
-        if self.negate:
-            passed = not passed
-            
         ctx.output.append({
             str(self.__class__): verdict
         })
 
-
-        if (self.unpin or not passed) and ctx.state.pin_req_id is not None:
-            if self.LOG:
-                print(
-                    "[sem-op] "
-                    f"SemFilter unpin pin_req_id={ctx.state.pin_req_id} "
-                    f"passed={passed} "
-                    f"self_unpin={self.unpin}"
-                )
-            await ctx.state.executor.unpin(ctx.state.raw_request, ctx.state.pin_req_id)
-            ctx.state.pin_req_id = None
-
-        return passed
+        return await self.handle_output(ctx, verdict)
 
     async def _run_blocking(self, ctxs: List[SemContext]) -> List[SemContext]:
         parent = self
@@ -143,8 +136,13 @@ class ICPFilter(BaseOp):
         high_threshold,
         max_tokens=8,
         position=-1,
+        predicate=True,
     ):
-        super().__init__(kind=OpKind.TUPLE_INDEPENDENT, position=position)
+        super().__init__(
+            behavior=OpBehavior.TUPLE_INDEPENDENT,
+            position=position,
+            predicate=predicate,
+        )
         if low_threshold is None or high_threshold is None:
             raise ValueError("ICPFilter requires both low_threshold and high_threshold.")
         if low_threshold > high_threshold:
@@ -179,7 +177,7 @@ class ICPFilter(BaseOp):
                     "score": score,
                 }
             })
-            return True
+            return await self.handle_output(ctx, True)
 
         if score <= self.low_threshold:
             ctx.output.append({
@@ -188,7 +186,7 @@ class ICPFilter(BaseOp):
                     "score": score,
                 }
             })
-            return False
+            return await self.handle_output(ctx, False)
 
         passed = await self.oracle_filter(ctx, priority=priority)
         ctx.output.append({
@@ -197,7 +195,7 @@ class ICPFilter(BaseOp):
                 "score": score,
             }
         })
-        return passed
+        return await self.handle_output(ctx, passed)
     
 
 class SemMap(BaseOp):
@@ -211,9 +209,14 @@ class SemMap(BaseOp):
         expand=False,
         pin=False,
         unpin=False,
-        position=-1
+        position=-1,
+        predicate=False,
     ):
-        super().__init__(kind=OpKind.TUPLE_INDEPENDENT, position=position)
+        super().__init__(
+            behavior=OpBehavior.TUPLE_INDEPENDENT,
+            position=position,
+            predicate=predicate,
+        )
         self.instruction = instruction
         self.max_tokens = max_tokens
         self.expand = expand
@@ -363,12 +366,19 @@ class SemMap(BaseOp):
     async def __call__(self, ctx: SemContext | List[SemContext], priority: int = 0):
         if isinstance(ctx, list):
             return await self._run_blocking(ctx)
-        return await self._run_single(ctx, priority=priority)
+        result = await self._run_single(ctx, priority=priority)
+        if result is RETRY_TASK:
+            return RETRY_TASK
+
+        return await self.handle_output(
+            result,
+            result.output[-1].get(str(self.__class__), ""),
+        )
 
 
 class CartesianProduct(BaseOp):
     def __init__(self, right_table, position=-1):
-        super().__init__(kind=OpKind.JOIN, position=position)
+        super().__init__(behavior=OpBehavior.JOIN, position=position)
         self.right_table = right_table
 
     def __call__(self, ctx):
@@ -405,7 +415,7 @@ class IndexedCartesianProduct(BaseOp):
         cp_id=None,
         position=-1,
     ):
-        super().__init__(kind=OpKind.JOIN, position=position)
+        super().__init__(behavior=OpBehavior.JOIN, position=position)
         self.right_table = right_table or []
         self.service_address = service_address
         self.service_port = service_port
@@ -521,7 +531,7 @@ class IndexedSearch(BaseOp):
         cp_id=None,
         position=-1,
     ):
-        super().__init__(kind=OpKind.TUPLE_INDEPENDENT, position=position)
+        super().__init__(behavior=OpBehavior.TUPLE_INDEPENDENT, position=position)
         self.right_table = right_table or []
         self.service_address = service_address
         self.service_port = service_port
@@ -646,8 +656,13 @@ class CascadeOperator(BaseOp):
         low_threshold=None,
         high_threshold=None,
         position=-1,
+        predicate=True,
     ):
-        super().__init__(kind=OpKind.TUPLE_INDEPENDENT, position=position)
+        super().__init__(
+            behavior=OpBehavior.TUPLE_INDEPENDENT,
+            position=position,
+            predicate=predicate,
+        )
         self.instruction = instruction
         self.negate = negate
         self.pin = pin
@@ -860,18 +875,18 @@ class CascadeOperator(BaseOp):
             "cascade_delegate_to_main_count": type(self).delegate_to_main_count,
         })
 
-        if self.unpin and ctx.state.pin_req_id is not None:
-            await ctx.state.executor.unpin(ctx.state.raw_request, ctx.state.pin_req_id)
-            ctx.state.pin_req_id = None
-
-        return passed
+        return await self.handle_output(ctx, passed)
 
 
 class SemClassify(BaseOp):
     LOG = False
 
-    def __init__(self, classes, pin=False, unpin=False, position=-1):
-        super().__init__(kind=OpKind.TUPLE_INDEPENDENT, position=position)
+    def __init__(self, classes, pin=False, unpin=False, position=-1, predicate=False):
+        super().__init__(
+            behavior=OpBehavior.TUPLE_INDEPENDENT,
+            position=position,
+            predicate=predicate,
+        )
         self.classes = list(classes)
         self.pin = pin
         self.unpin = unpin
@@ -942,12 +957,12 @@ class SemClassify(BaseOp):
             await ctx.state.executor.unpin(ctx.state.raw_request, ctx.state.pin_req_id)
             ctx.state.pin_req_id = None
 
-        return ctx
+        return await self.handle_output(ctx, group_output)
 
 
 class SemAgg(BaseOp):
     def __init__(self, instruction: str, max_tokens: int = 8192, concurrency: int = 8, position=-1):
-        super().__init__(kind=OpKind.BLOCKING, position=position)
+        super().__init__(behavior=OpBehavior.BLOCKING, position=position)
         self.instruction = instruction
         self.max_tokens = max_tokens
         self.concurrency = concurrency
@@ -1084,7 +1099,7 @@ class SemTopK(BaseOp):
     MERGE_RANK_THRESHOLD = 8
 
     def __init__(self, instruction: str, k: int= 10, concurrency: int = 20, position=-1):
-        super().__init__(kind=OpKind.BLOCKING, position=position)
+        super().__init__(behavior=OpBehavior.BLOCKING, position=position)
         
         self.instruction = instruction
         self.k = k
