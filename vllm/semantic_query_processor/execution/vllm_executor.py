@@ -1,4 +1,5 @@
 # execution/vllm_executor.py
+import asyncio
 import json
 from fastapi import Request
 from vllm.entrypoints.openai.protocol import CompletionRequest, ChatCompletionRequest
@@ -11,12 +12,31 @@ from .executor import LLMExecutor, CompletionResult
 class VLLMExecutor(LLMExecutor):
 
     UNPIN_FUNCTION = 'unpin_request'
+    DEFAULT_GLOBAL_CONCURRENCY = 64
     LOG = False
+    _global_llm_semaphore: asyncio.Semaphore | None = asyncio.Semaphore(
+        DEFAULT_GLOBAL_CONCURRENCY
+    )
 
     @classmethod
     def _log(cls, message: str):
         if cls.LOG:
             print(message)
+
+    @classmethod
+    def set_global_concurrency(cls, limit: int | None):
+        if limit is None:
+            cls._global_llm_semaphore = None
+            return
+
+        if limit <= 0:
+            raise ValueError("global LLM concurrency must be a positive integer")
+
+        cls._global_llm_semaphore = asyncio.Semaphore(limit)
+
+    @classmethod
+    def _get_global_llm_semaphore(cls) -> asyncio.Semaphore | None:
+        return cls._global_llm_semaphore
 
     @staticmethod
     def _owner_key(raw_request: Request) -> str:
@@ -91,10 +111,18 @@ class VLLMExecutor(LLMExecutor):
             f"prompt_items={prompt_items}"
         )
 
-        gen = await create_chat_completion(
-            request=req,
-            raw_request=raw_request,
-        )
+        semaphore = self._get_global_llm_semaphore()
+        if semaphore is None:
+            gen = await create_chat_completion(
+                request=req,
+                raw_request=raw_request,
+            )
+        else:
+            async with semaphore:
+                gen = await create_chat_completion(
+                    request=req,
+                    raw_request=raw_request,
+                )
         self._log(
             "[vllm-exec] "
             f"returned kind=chat "
@@ -145,10 +173,18 @@ class VLLMExecutor(LLMExecutor):
             f"prompt_len={prompt_len}"
         )
 
-        gen = await create_completion(
-            request=req,
-            raw_request=raw_request,
-        )
+        semaphore = self._get_global_llm_semaphore()
+        if semaphore is None:
+            gen = await create_completion(
+                request=req,
+                raw_request=raw_request,
+            )
+        else:
+            async with semaphore:
+                gen = await create_completion(
+                    request=req,
+                    raw_request=raw_request,
+                )
         self._log(
             "[vllm-exec] "
             f"returned kind=completion "

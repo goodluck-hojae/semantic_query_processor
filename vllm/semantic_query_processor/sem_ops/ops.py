@@ -33,7 +33,7 @@ class SemFilter(BaseOp):
         predicate=True,
     ):
         super().__init__(
-            behavior=OpBehavior.TUPLE_INDEPENDENT,
+            behavior=OpBehavior.BLOCKING, #OpBehavior.TUPLE_INDEPENDENT,
             position=position,
             predicate=predicate,
         )
@@ -139,7 +139,7 @@ class ICPFilter(BaseOp):
         predicate=True,
     ):
         super().__init__(
-            behavior=OpBehavior.TUPLE_INDEPENDENT,
+            behavior=OpBehavior.BLOCKING,
             position=position,
             predicate=predicate,
         )
@@ -165,7 +165,7 @@ class ICPFilter(BaseOp):
             return 1
         return self.oracle_filter.estimate_tokens(ctx)
 
-    async def __call__(self, ctx: SemContext, priority: int = 0):
+    async def _run_single(self, ctx: SemContext, priority: int = 0):
         score = ctx.state.helper_score
         if score is None:
             raise ValueError("ICPFilter expected helper_score on context state.")
@@ -196,6 +196,39 @@ class ICPFilter(BaseOp):
             }
         })
         return await self.handle_output(ctx, passed)
+
+    async def _run_blocking(self, ctxs: List[SemContext]) -> List[SemContext]:
+        parent = self
+
+        def build_task(ctx: SemContext):
+            class ICPFilterTask:
+                def __init__(self):
+                    self.ctx = ctx
+                    self.budget = (
+                        parent.estimate_tokens(ctx)
+                        * KVMemoryManager.get_instance().bytes_per_token
+                    )
+
+                async def __call__(self):
+                    passed = await parent._run_single(self.ctx)
+                    return self.ctx if passed else None
+
+            return ICPFilterTask()
+
+        results = await BlockingExecutor.execute_tasks(
+            seeds=ctxs,
+            task_builder=build_task,
+        )
+        return [ctx for ctx in results if ctx is not None]
+
+    async def __call__(
+        self,
+        ctx: SemContext | List[SemContext],
+        priority: int = 0,
+    ):
+        if isinstance(ctx, list):
+            return await self._run_blocking(ctx)
+        return await self._run_single(ctx, priority=priority)
     
 
 class SemMap(BaseOp):
@@ -213,7 +246,7 @@ class SemMap(BaseOp):
         predicate=False,
     ):
         super().__init__(
-            behavior=OpBehavior.TUPLE_INDEPENDENT,
+            behavior=OpBehavior.BLOCKING,
             position=position,
             predicate=predicate,
         )
@@ -531,7 +564,7 @@ class IndexedSearch(BaseOp):
         cp_id=None,
         position=-1,
     ):
-        super().__init__(behavior=OpBehavior.TUPLE_INDEPENDENT, position=position)
+        super().__init__(behavior=OpBehavior.BLOCKING, position=position)
         self.right_table = right_table or []
         self.service_address = service_address
         self.service_port = service_port
@@ -601,7 +634,7 @@ class IndexedSearch(BaseOp):
             ),
         )
 
-    async def __call__(self, ctx, priority: int = 0):
+    async def _run_single(self, ctx: SemContext, priority: int = 0) -> SemContext:
         query_data = self._query_text_from_data(ctx.input.data)
         ranked_rows = await asyncio.to_thread(
             self._query_retrieval,
@@ -632,6 +665,37 @@ class IndexedSearch(BaseOp):
 
         return ctx
 
+    async def _run_blocking(self, ctxs: List[SemContext]) -> List[SemContext]:
+        parent = self
+
+        def build_task(ctx: SemContext):
+            class SearchTask:
+                def __init__(self):
+                    self.ctx = ctx
+                    self.budget = (
+                        parent.estimate_tokens(ctx)
+                        * KVMemoryManager.get_instance().bytes_per_token
+                    )
+
+                async def __call__(self):
+                    return await parent._run_single(self.ctx)
+
+            return SearchTask()
+
+        return await BlockingExecutor.execute_tasks(
+            seeds=ctxs,
+            task_builder=build_task,
+        )
+
+    async def __call__(
+        self,
+        ctx: SemContext | List[SemContext],
+        priority: int = 0,
+    ) -> SemContext | List[SemContext]:
+        if isinstance(ctx, list):
+            return await self._run_blocking(ctx)
+        return await self._run_single(ctx, priority=priority)
+
 
 
 
@@ -659,7 +723,7 @@ class CascadeOperator(BaseOp):
         predicate=True,
     ):
         super().__init__(
-            behavior=OpBehavior.TUPLE_INDEPENDENT,
+            behavior=OpBehavior.BLOCKING,
             position=position,
             predicate=predicate,
         )

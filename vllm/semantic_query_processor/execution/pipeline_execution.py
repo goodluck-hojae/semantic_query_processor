@@ -523,17 +523,15 @@ class AsyncPipelineExecutor:
 
 
 class BlockingExecutor:
+    DEFAULT_CONCURRENCY = 256
 
     @staticmethod
     async def execute_tasks(
         seeds,
         task_builder,
-        concurrency: int = 100,
+        concurrency: int = DEFAULT_CONCURRENCY,
     ):
-        manager = KVMemoryManager.get_instance()
-
         queue = asyncio.Queue(maxsize=concurrency)
-        capacity_cond = asyncio.Condition()
         results = []
 
         async def worker():
@@ -543,9 +541,6 @@ class BlockingExecutor:
                     out = await task()
                     results.append(out)
                 finally:
-                    async with capacity_cond:
-                        await manager.release(task.budget)
-                        capacity_cond.notify_all()
                     queue.task_done()
 
         workers = [
@@ -555,12 +550,6 @@ class BlockingExecutor:
 
         for seed in seeds:
             task = task_builder(seed)
-
-            async with capacity_cond:
-                while not await manager.can_admit(task.budget):
-                    await capacity_cond.wait()
-                await manager.allocate(task.budget)
-
             await queue.put(task)
 
         await queue.join()
