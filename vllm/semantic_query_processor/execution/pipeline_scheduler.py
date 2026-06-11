@@ -2,7 +2,7 @@ import asyncio
 # import math
 import time
 
-from vllm.semantic_query_processor.budget import KVMemoryManager
+from vllm.semantic_query_processor.resources.budget import KVMemoryManager
 from vllm.semantic_query_processor.context import RetryTaskResult
 # from vllm.semantic_query_processor.controller.map_estimator import MapRatioEstimator
 from vllm.semantic_query_processor.controller.stage import Task
@@ -12,7 +12,7 @@ from vllm.semantic_query_processor.sem_ops import OpBehavior, ops
 class PlanExecutor:
 
     def __init__(self):
-        self.pipeline_executor = AsyncPipelineExecutor()
+        self.pipeline_scheduler = AsyncPipelineScheduler()
         self.blocking_executor = BlockingExecutor()
 
     async def execute(self, ctxs, plan):
@@ -32,7 +32,7 @@ class PlanExecutor:
 
             # STAGES
             else:
-                ctxs, stage_stat = await self.pipeline_executor.execute_tasks(
+                ctxs, stage_stat = await self.pipeline_scheduler.execute_tasks(
                     ctxs,
                     item,
                 )
@@ -103,7 +103,7 @@ class JoinTracker:
                 self.on_release(self.stage_id, self.reserved_budget)
 
 
-class AsyncPipelineExecutor:
+class AsyncPipelineScheduler:
     LOG_SCHEDULER = True
     LOG_SCHEDULER_INTERVAL_SEC = 1.0
     LOG_RETRY_TRACE = False
@@ -523,7 +523,7 @@ class AsyncPipelineExecutor:
 
 
 class BlockingExecutor:
-    DEFAULT_CONCURRENCY = 256
+    DEFAULT_CONCURRENCY = 512
 
     @staticmethod
     async def execute_tasks(
@@ -531,7 +531,10 @@ class BlockingExecutor:
         task_builder,
         concurrency: int = DEFAULT_CONCURRENCY,
     ):
+        manager = KVMemoryManager.get_instance()
+
         queue = asyncio.Queue(maxsize=concurrency)
+        capacity_cond = asyncio.Condition()
         results = []
 
         async def worker():
@@ -541,6 +544,9 @@ class BlockingExecutor:
                     out = await task()
                     results.append(out)
                 finally:
+                    async with capacity_cond:
+                        await manager.release(task.budget)
+                        capacity_cond.notify_all()
                     queue.task_done()
 
         workers = [
@@ -550,6 +556,12 @@ class BlockingExecutor:
 
         for seed in seeds:
             task = task_builder(seed)
+
+            async with capacity_cond:
+                while not await manager.can_admit(task.budget):
+                    await capacity_cond.wait()
+                await manager.allocate(task.budget)
+
             await queue.put(task)
 
         await queue.join()

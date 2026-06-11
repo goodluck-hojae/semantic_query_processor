@@ -3,8 +3,8 @@ import random
 from vllm.semantic_query_processor.sem_ops import OpBehavior, OpName, ops
 from vllm.semantic_query_processor.query import Query
 from vllm.semantic_query_processor.data import data
-from vllm.semantic_query_processor.budget import KVMemoryManager
-from vllm.semantic_query_processor.execution.pipeline_execution import PlanExecutor
+from vllm.semantic_query_processor.resources.budget import KVMemoryManager
+from vllm.semantic_query_processor.execution.pipeline_scheduler import PlanExecutor
 from vllm.semantic_query_processor.controller.map_estimator import MapRatioEstimator
 from .stage import Stage, Task, stage_builder
 

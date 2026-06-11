@@ -2,7 +2,7 @@ from pathlib import Path
 import asyncio
 from time import monotonic
 
-from vllm.semantic_query_processor.budget import KVMemoryManager
+from vllm.semantic_query_processor.resources.budget import KVMemoryManager
 from vllm.semantic_query_processor.query import Query
 from vllm.semantic_query_processor.controller import SemanticPlan
 from vllm.semantic_query_processor.execution.vllm_executor import VLLMExecutor

@@ -2,7 +2,7 @@ import os
 import csv 
 from pathlib import Path 
 from vllm.semantic_query_processor.context import SemContext, SemanticInput, ExecutionState
-from vllm.semantic_query_processor.budget import KVMemoryManager
+from vllm.semantic_query_processor.resources.budget import KVMemoryManager
 from vllm.semantic_query_processor.sem_ops.prompt_utils import get_data_prompt
 
 

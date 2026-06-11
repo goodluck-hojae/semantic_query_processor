@@ -1,5 +1,5 @@
 from .base import OpName
-from vllm.semantic_query_processor.budget import KVMemoryManager
+from vllm.semantic_query_processor.resources.budget import KVMemoryManager
 
 
 SYSTEM_PROMPT = (

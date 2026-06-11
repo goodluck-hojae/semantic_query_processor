@@ -12,7 +12,7 @@ from .executor import LLMExecutor, CompletionResult
 class VLLMExecutor(LLMExecutor):
 
     UNPIN_FUNCTION = 'unpin_request'
-    DEFAULT_GLOBAL_CONCURRENCY = 64
+    DEFAULT_GLOBAL_CONCURRENCY = 512
     LOG = False
     _global_llm_semaphore: asyncio.Semaphore | None = asyncio.Semaphore(
         DEFAULT_GLOBAL_CONCURRENCY

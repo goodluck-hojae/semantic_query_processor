@@ -3,7 +3,7 @@ import math
 from itertools import count
 from typing import Any
 
-from vllm.semantic_query_processor.budget import KVMemoryManager
+from vllm.semantic_query_processor.resources.budget import KVMemoryManager
 from vllm.semantic_query_processor.context import RETRY_TASK, RetryTaskResult
 from vllm.semantic_query_processor.sem_ops import OpBehavior, ops
 
