@@ -56,6 +56,7 @@ class KVMemoryManager:
         self._stage_max_capacity = {}
         self._stage_used = {}
         self._stage_inflight = {}
+        self._stage_rebalance_enabled = {}
 
         self._cond = asyncio.Condition()
 
@@ -67,6 +68,7 @@ class KVMemoryManager:
         min_fraction: float | None = None,
         max_fraction: float | None = None,
         min_capacity_bytes: int | None = None,
+        rebalance_enabled: bool = True,
     ):
         min_fraction = fraction if min_fraction is None else min_fraction
         max_fraction = fraction if max_fraction is None else max_fraction
@@ -78,6 +80,7 @@ class KVMemoryManager:
         self._stage_max_capacity[stage_id] = self._capacity * max_fraction
         self._stage_used[stage_id] = 0
         self._stage_inflight[stage_id] = 0
+        self._stage_rebalance_enabled[stage_id] = rebalance_enabled
 
     def _log_rebalance(self, event: str):
         if not self.REBALANCE_LOG:
@@ -111,6 +114,8 @@ class KVMemoryManager:
         async with self._cond:
             receiver_cap = self._stage_capacity.get(receiver_id, 0)
             receiver_max = self._stage_max_capacity.get(receiver_id, receiver_cap)
+            if not self._stage_rebalance_enabled.get(receiver_id, True):
+                return False
             if receiver_cap >= receiver_max:
                 return False
 
@@ -124,6 +129,9 @@ class KVMemoryManager:
             )
 
             for donor_id in donor_ids:
+                if not self._stage_rebalance_enabled.get(donor_id, True):
+                    continue
+
                 donor_cap = self._stage_capacity.get(donor_id, 0)
                 donor_min = self._stage_min_capacity.get(donor_id, donor_cap)
                 donor_used = self._stage_used.get(donor_id, 0)
@@ -160,6 +168,9 @@ class KVMemoryManager:
 
         async with self._cond:
             cur_cap = self._stage_capacity.get(stage_id, 0)
+            if not self._stage_rebalance_enabled.get(stage_id, True):
+                return False
+
             min_cap = self._stage_min_capacity.get(stage_id, cur_cap)
             cur_used = self._stage_used.get(stage_id, 0)
             floor = cur_used if force_return else max(min_cap, cur_used)
@@ -169,6 +180,8 @@ class KVMemoryManager:
 
             receiver_id = self._last_stage_id()
             if receiver_id is None or receiver_id == stage_id:
+                return False
+            if not self._stage_rebalance_enabled.get(receiver_id, True):
                 return False
 
             receiver_cap = self._stage_capacity.get(receiver_id, 0)

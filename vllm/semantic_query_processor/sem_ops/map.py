@@ -48,6 +48,7 @@ class SemMap(BaseOp):
 
         ratio = MapRatioEstimator.instance().get_ratio(self.position)
         return int(ratio * prompt_token_len) if ratio else int(prompt_token_len)  #1
+        # return 1
 
     def _build_prompt(self, ctx):
         return get_prompt(self.instruction, ctx.input.data, op=OpName.SEM_MAP)
