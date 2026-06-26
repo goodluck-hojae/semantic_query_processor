@@ -53,21 +53,22 @@ class SemFilter(BaseOp):
         data_part, prompt = self._build_prompts(ctx)
 
         # Data part is only required to bin
-        # data_result = await ctx.state.executor.execute(
-        #         raw_request=ctx.state.raw_request,
-        #         prompt=data_part,
-        #         max_tokens=1,
-        #         pin=self.pin,
-        # )
+        if self.pin:
+            data_result = await ctx.state.executor.execute(
+                    raw_request=ctx.state.raw_request,
+                    prompt=data_part,
+                    max_tokens=1,
+                    pin=self.pin,
+            )
         output = await ctx.state.executor.execute(
                 raw_request=ctx.state.raw_request,
                 prompt=prompt,
                 max_tokens=self.max_tokens,
-                pin=self.pin,
+                pin=False,
                 priority=priority,
         )
         if self.pin:
-            ctx.state.pin_req_id = output.request_id
+            ctx.state.pin_req_id = data_result.request_id
 
         # appended_prompt, appended_prompt_str = add_assistant_prompt(prompt, output.text)
         verdict = output.text.strip().lower()
@@ -229,20 +230,21 @@ class SemMap(BaseOp):
             return ctx.state.retry_max_tokens
 
         if prompt_token_len is None:
-            prompt = self._build_prompt(ctx)
-            prompt_str = KVMemoryManager.get_instance().apply_chat_template(prompt)
+            data_prompt, prompt = self._build_prompt(ctx)
+            prompt_str = KVMemoryManager.get_instance().apply_chat_template(data_prompt)
             prompt_token_len = KVMemoryManager.get_instance().token_length(prompt_str)
 
         ratio = MapRatioEstimator.instance().get_ratio(self.position)
         return int(ratio * prompt_token_len) if ratio else int(prompt_token_len)  #1
 
     def _build_prompt(self, ctx):
-        return get_prompt(self.instruction, ctx.input.data, op=OpName.SEM_MAP)
+        data_prompt = ctx.input.data if 'system' in ctx.input.data[0]['role'] else get_system_prompt() + ctx.input.data
+        return data_prompt, get_prompt(self.instruction, ctx.input.data, op=OpName.SEM_MAP)
     
 
     def estimate_tokens(self, ctx):
-        prompt = self._build_prompt(ctx)
-        prompt_str = KVMemoryManager.get_instance().apply_chat_template(prompt)
+        data_prompt, prompt = self._build_prompt(ctx)
+        prompt_str = KVMemoryManager.get_instance().apply_chat_template(data_prompt)
         prompt_token_len = KVMemoryManager.get_instance().token_length(prompt_str)
         self.max_tokens = self._planned_max_tokens(ctx, prompt_token_len)
         return prompt_token_len + self.max_tokens
@@ -253,16 +255,23 @@ class SemMap(BaseOp):
         raw_request = ctx.state.raw_request
         previous_pin_req_id = ctx.state.pin_req_id if self.pin else None
 
-        prompt = self._build_prompt(ctx)
-        prompt_str = KVMemoryManager.get_instance().apply_chat_template(prompt)
+        data_prompt, prompt = self._build_prompt(ctx)
+        prompt_str = KVMemoryManager.get_instance().apply_chat_template(data_prompt)
         input_token_len = KVMemoryManager.get_instance().token_length(prompt_str)
         max_tokens = self._planned_max_tokens(ctx, input_token_len)
 
+        if self.pin:
+            data_result = await ctx.state.executor.execute(
+                    raw_request=ctx.state.raw_request,
+                    prompt=data_prompt,
+                    max_tokens=1,
+                    pin=self.pin,
+            )
         output = await executor.execute(
             raw_request=raw_request,
             prompt=prompt,
             max_tokens=max_tokens,
-            pin=self.pin,
+            pin=False,
             priority=priority,
         )
         
@@ -270,7 +279,7 @@ class SemMap(BaseOp):
             # if self.pin:
             #     ctx.state.pin_req_id = output.request_id
             if self.pin:
-                await executor.unpin(raw_request, output.request_id)
+                await executor.unpin(raw_request, data_result.request_id)
                 if (
                     previous_pin_req_id is not None
                     and previous_pin_req_id != output.request_id
@@ -306,7 +315,7 @@ class SemMap(BaseOp):
             ctx.state.retry_max_tokens = 0
 
         appended_prompt, appended_prompt_str = add_assistant_prompt(prompt, output.text)
-        ctx.input.data = appended_prompt
+        ctx.input.data = data_prompt
         # Update ratio
         MapRatioEstimator.instance().update(self.position, input_token_len, KVMemoryManager.get_instance().token_length(appended_prompt_str)-input_token_len)
 
@@ -320,7 +329,7 @@ class SemMap(BaseOp):
                 and previous_pin_req_id != output.request_id
             ):
                 await executor.unpin(raw_request, previous_pin_req_id)
-            ctx.state.pin_req_id = output.request_id
+            ctx.state.pin_req_id = data_result.request_id
         elif self.unpin and ctx.state.pin_req_id:
             if self.LOG:
                 print(
