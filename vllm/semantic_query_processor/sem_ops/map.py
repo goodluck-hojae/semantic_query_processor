@@ -47,7 +47,8 @@ class SemMap(BaseOp):
             prompt_token_len = KVMemoryManager.get_instance().token_length(prompt_str)
 
         ratio = MapRatioEstimator.instance().get_ratio(self.position)
-        return int(ratio * prompt_token_len) if ratio else int(prompt_token_len)  #1
+        return int(ratio * prompt_token_len) if ratio else int(prompt_token_len)  
+        # return 500
 
     def _build_prompt(self, ctx):
         return get_prompt(self.instruction, ctx.input.data, op=OpName.SEM_MAP)
@@ -70,6 +71,10 @@ class SemMap(BaseOp):
         prompt_str = KVMemoryManager.get_instance().apply_chat_template(prompt)
         input_token_len = KVMemoryManager.get_instance().token_length(prompt_str)
         max_tokens = self._planned_max_tokens(ctx, input_token_len)
+        is_retry_call = (
+            ctx.state.retry_op_position == self.position
+            and ctx.state.retry_max_tokens > 0
+        )
 
         output = await executor.execute(
             raw_request=raw_request,
@@ -77,6 +82,7 @@ class SemMap(BaseOp):
             max_tokens=max_tokens,
             pin=self.pin,
             priority=priority,
+            retry=is_retry_call,
         )
         
         if output.finish_reason == "length" and max_tokens < SemMap.MAX_TOKEN_LIMIT:

@@ -18,7 +18,8 @@ class LLMExecutor(ABC):
         prompt,
         max_tokens: int,
         pin: bool = False,
-        priority: int = 0
+        priority: int = 0,
+        retry: bool = False,
     ) -> CompletionResult:
         pass
 
@@ -28,7 +29,8 @@ class LLMExecutor(ABC):
         prompt,
         max_tokens: int,
         pin: bool = False,
-        priority: int = 0
+        priority: int = 0,
+        retry: bool = False,
     ) -> CompletionResult:
         pass
 

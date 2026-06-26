@@ -3,7 +3,6 @@ import asyncio
 import json
 from fastapi import Request
 from vllm.entrypoints.openai.protocol import CompletionRequest, ChatCompletionRequest
-from vllm.entrypoints.openai.api_server import create_completion, create_chat_completion
 from vllm.semantic_query_processor.pin_registry import PinnedRequestRegistry
 
 from .executor import LLMExecutor, CompletionResult
@@ -14,6 +13,12 @@ class VLLMExecutor(LLMExecutor):
     UNPIN_FUNCTION = 'unpin_request'
     DEFAULT_GLOBAL_CONCURRENCY = 512
     LOG = False
+    _llm_call_count = 0
+    _chat_call_count = 0
+    _completion_call_count = 0
+    _retry_llm_call_count = 0
+    _retry_chat_call_count = 0
+    _retry_completion_call_count = 0
     _global_llm_semaphore: asyncio.Semaphore | None = asyncio.Semaphore(
         DEFAULT_GLOBAL_CONCURRENCY
     )
@@ -22,6 +27,42 @@ class VLLMExecutor(LLMExecutor):
     def _log(cls, message: str):
         if cls.LOG:
             print(message)
+
+    @classmethod
+    def _record_llm_call(cls, kind: str, retry: bool = False) -> int:
+        cls._llm_call_count += 1
+        if kind == "chat":
+            cls._chat_call_count += 1
+        elif kind == "completion":
+            cls._completion_call_count += 1
+
+        if retry:
+            cls._retry_llm_call_count += 1
+            if kind == "chat":
+                cls._retry_chat_call_count += 1
+            elif kind == "completion":
+                cls._retry_completion_call_count += 1
+        return cls._llm_call_count
+
+    @classmethod
+    def llm_call_stats(cls) -> dict[str, int]:
+        return {
+            "total": cls._llm_call_count,
+            "chat": cls._chat_call_count,
+            "completion": cls._completion_call_count,
+            "retry_total": cls._retry_llm_call_count,
+            "retry_chat": cls._retry_chat_call_count,
+            "retry_completion": cls._retry_completion_call_count,
+        }
+
+    @classmethod
+    def reset_llm_call_stats(cls):
+        cls._llm_call_count = 0
+        cls._chat_call_count = 0
+        cls._completion_call_count = 0
+        cls._retry_llm_call_count = 0
+        cls._retry_chat_call_count = 0
+        cls._retry_completion_call_count = 0
 
     @classmethod
     def set_global_concurrency(cls, limit: int | None):
@@ -80,7 +121,8 @@ class VLLMExecutor(LLMExecutor):
         prompt,
         max_tokens: int,
         pin: bool = False,
-        priority: int = 0
+        priority: int = 0,
+        retry: bool = False,
     ) -> CompletionResult:
         llm_func = self.complete if type(prompt) is str else self.chatcomplete
         return await llm_func(
@@ -89,6 +131,7 @@ class VLLMExecutor(LLMExecutor):
             max_tokens=max_tokens,
             pin=pin,
             priority=priority,
+            retry=retry,
         )
 
 
@@ -98,7 +141,8 @@ class VLLMExecutor(LLMExecutor):
         prompt,
         max_tokens: int,
         pin: bool = False,
-        priority: int = 0
+        priority: int = 0,
+        retry: bool = False,
     ) -> CompletionResult:
         req = self._build_chat_request(prompt, max_tokens, pin, priority)
         prompt_items = len(prompt) if isinstance(prompt, list) else 1
@@ -108,8 +152,15 @@ class VLLMExecutor(LLMExecutor):
             f"max_tokens={max_tokens} "
             f"pin={pin} "
             f"priority={priority} "
+            f"retry={retry} "
             f"prompt_items={prompt_items}"
         )
+
+        call_count = self._record_llm_call("chat", retry=retry)
+        self._log(
+            f"[vllm-exec] llm_call kind=chat retry={retry} total={call_count}"
+        )
+        from vllm.entrypoints.openai.api_server import create_chat_completion
 
         semaphore = self._get_global_llm_semaphore()
         if semaphore is None:
@@ -160,7 +211,8 @@ class VLLMExecutor(LLMExecutor):
         prompt,
         max_tokens: int,
         pin: bool = False,
-        priority: int = 0
+        priority: int = 0,
+        retry: bool = False,
     ) -> CompletionResult:
         req = self._build_request(prompt, max_tokens, pin, priority)
         prompt_len = len(prompt) if isinstance(prompt, str) else 1
@@ -170,8 +222,16 @@ class VLLMExecutor(LLMExecutor):
             f"max_tokens={max_tokens} "
             f"pin={pin} "
             f"priority={priority} "
+            f"retry={retry} "
             f"prompt_len={prompt_len}"
         )
+
+        call_count = self._record_llm_call("completion", retry=retry)
+        self._log(
+            "[vllm-exec] "
+            f"llm_call kind=completion retry={retry} total={call_count}"
+        )
+        from vllm.entrypoints.openai.api_server import create_completion
 
         semaphore = self._get_global_llm_semaphore()
         if semaphore is None:

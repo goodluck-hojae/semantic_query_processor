@@ -46,10 +46,22 @@ class QueryProcessor:
     async def execute(self, raw_request, query: Query):
         plan = SemanticPlan(self.executor)
         owner_key = str(id(raw_request))
+        VLLMExecutor.reset_llm_call_stats()
         try:
             return await plan.execute(raw_request, query)
         finally:
             await self._cleanup_query_pins(raw_request, owner_key)
+            stats = VLLMExecutor.llm_call_stats()
+            print(
+                "[QueryProcessor] query finished; "
+                f"llm_calls total={stats['total']} "
+                f"chat={stats['chat']} "
+                f"completion={stats['completion']} "
+                f"retry_total={stats['retry_total']} "
+                f"retry_chat={stats['retry_chat']} "
+                f"retry_completion={stats['retry_completion']}"
+            )
+            VLLMExecutor.reset_llm_call_stats()
 
     def start_stuck_monitor(self, engine_client):
         if self._stuck_monitor_task is None or self._stuck_monitor_task.done():

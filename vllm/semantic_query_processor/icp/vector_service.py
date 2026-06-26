@@ -10,7 +10,6 @@ import numpy as np
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
-from sentence_transformers import SentenceTransformer
 
 
 def _normalize_tuple(values: list[Any] | tuple[Any, ...]) -> tuple[Any, ...]:
@@ -65,6 +64,8 @@ def _query_text(left_tuple: tuple[Any, ...]) -> str:
 # -----------------------------
 class SentenceTransformersRM:
     def __init__(self, model_name: str):
+        from sentence_transformers import SentenceTransformer
+
         self.model = SentenceTransformer(model_name)
 
     def encode(self, texts: list[str]) -> np.ndarray:
