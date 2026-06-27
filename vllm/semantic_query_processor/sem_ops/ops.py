@@ -315,7 +315,7 @@ class SemMap(BaseOp):
             ctx.state.retry_max_tokens = 0
 
         appended_prompt, appended_prompt_str = add_assistant_prompt(prompt, output.text)
-        ctx.input.data = data_prompt
+        ctx.input.data = appended_prompt
         # Update ratio
         MapRatioEstimator.instance().update(self.position, input_token_len, KVMemoryManager.get_instance().token_length(appended_prompt_str)-input_token_len)
 
