@@ -10,15 +10,19 @@ import numpy as np
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
-from sentence_transformers import SentenceTransformer
 
 
 def _normalize_tuple(values: list[Any] | tuple[Any, ...]) -> tuple[Any, ...]:
     return tuple(values)
 
 
-_CONTEXT_TEXT_RE = re.compile(r'"text":\s*(.+?)(?:\n|$)', re.DOTALL)
+import re
+from typing import Any
 
+_TEXT_FIELD_RE = re.compile(
+    r'"text"\s*:\s*(.*?)(?:\n\s*}\s*$|$)',
+    re.DOTALL,
+)
 
 def _extract_text_value(value: Any) -> str:
     if value is None:
@@ -28,10 +32,19 @@ def _extract_text_value(value: Any) -> str:
         text = value.strip()
         if not text:
             return ""
-        match = _CONTEXT_TEXT_RE.search(text)
+
+        match = _TEXT_FIELD_RE.search(text)
         if match:
-            return match.group(1).strip().rstrip(",").strip().strip('"')
-        return text
+            text = match.group(1)
+
+        return (
+            text
+            .strip()
+            .rstrip(",")
+            .strip()
+            .strip('"')
+            .strip()
+        )
 
     if isinstance(value, dict):
         if "text" in value:
@@ -44,7 +57,6 @@ def _extract_text_value(value: Any) -> str:
         return " ".join(filter(None, (_extract_text_value(item) for item in value)))
 
     return str(value)
-
 
 def _serialize_tuple(t: tuple[Any, ...]) -> str:
     if len(t) == 2 and isinstance(t[0], int):
@@ -65,6 +77,8 @@ def _query_text(left_tuple: tuple[Any, ...]) -> str:
 # -----------------------------
 class SentenceTransformersRM:
     def __init__(self, model_name: str):
+        from sentence_transformers import SentenceTransformer
+
         self.model = SentenceTransformer(model_name)
 
     def encode(self, texts: list[str]) -> np.ndarray:
