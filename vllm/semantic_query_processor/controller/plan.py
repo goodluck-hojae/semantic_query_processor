@@ -106,17 +106,17 @@ class SemanticPlan:
                     min_fraction=1.0,
                     max_fraction=1.0,
                 )
-            elif num_stages == 2:
-                fixed_fractions = (0.9, 0.1)#(0.1, 0.9)
-                for sid, fraction in zip(stage_ids, fixed_fractions):
-                    kv.register_stage(
-                        sid,
-                        fraction,
-                        min_fraction=fraction,
-                        max_fraction=fraction,
-                        min_capacity_bytes=stage_min_caps.get(sid, 0),
-                        rebalance_enabled=False,
-                    )
+            # elif num_stages == 2:
+            #     fixed_fractions = (0.5, 0.5)#(0.1, 0.9)
+            #     for sid, fraction in zip(stage_ids, fixed_fractions):
+            #         kv.register_stage(
+            #             sid,
+            #             fraction,
+            #             min_fraction=fraction,
+            #             max_fraction=fraction,
+            #             min_capacity_bytes=stage_min_caps.get(sid, 0),
+            #             rebalance_enabled=False,
+            #         )
             # Start early stages at their minimum admission budget and give the
             # last stage the remaining capacity, since it is usually the
             # bottleneck after fanout.

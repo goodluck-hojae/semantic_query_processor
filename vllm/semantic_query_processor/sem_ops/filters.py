@@ -59,22 +59,22 @@ class SemFilter(BaseOp):
     async def _run_single(self, ctx: SemContext, priority: int = 0):
         data_part, prompt = self._build_prompts(ctx)
 
-        # Data part is only required to bin
-        # data_result = await ctx.state.executor.execute(
-        #         raw_request=ctx.state.raw_request,
-        #         prompt=data_part,
-        #         max_tokens=1,
-        #         pin=self.pin,
-        # )
+        if self.pin:
+            data_result = await ctx.state.executor.execute(
+                    raw_request=ctx.state.raw_request,
+                    prompt=data_part,
+                    max_tokens=1,
+                    pin=self.pin,
+            )
+            ctx.state.pin_req_id = data_result.request_id
+            
         output = await ctx.state.executor.execute(
                 raw_request=ctx.state.raw_request,
                 prompt=prompt,
                 max_tokens=self.max_tokens,
-                pin=self.pin,
+                pin=False,
                 priority=priority,
         )
-        if self.pin:
-            ctx.state.pin_req_id = output.request_id
 
         # appended_prompt, appended_prompt_str = add_assistant_prompt(prompt, output.text)
         verdict = output.text.strip().lower()
