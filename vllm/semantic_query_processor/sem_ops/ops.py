@@ -866,11 +866,14 @@ class CascadeOperator(BaseOp):
             positive_prob = None
         else:
             resolved = self._resolve_with_thresholds(helper_probs)
-            print(resolved)
-            if resolved[0] is None:
+            if resolved is None:
+                positive_prob = None
                 verdict, resolved_by = await self._fallback_to_main_executor(ctx, prompt, priority)
                 passed = self.FALSE not in verdict
-                passed, positive_prob = resolved
+            elif resolved[0] is None:
+                _, positive_prob = resolved
+                verdict, resolved_by = await self._fallback_to_main_executor(ctx, prompt, priority)
+                passed = self.FALSE not in verdict
             else:
                 passed, positive_prob = resolved
                 resolved_by = "helper"
