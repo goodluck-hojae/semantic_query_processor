@@ -109,6 +109,15 @@ class SemanticPlan:
             # Start early stages at their minimum admission budget and give the
             # last stage the remaining capacity, since it is usually the
             # bottleneck after fanout.
+            elif num_stages == 2:
+                fixed_fractions = (0.9, 0.1)
+                for sid, fraction in zip(stage_ids, fixed_fractions):
+                    kv.register_stage(
+                        sid,
+                        fraction,
+                        min_fraction=fraction,
+                        max_fraction=fraction,
+                    )
             elif num_stages > 1:
                 total_capacity = kv.capacity()
                 assigned_caps = {
