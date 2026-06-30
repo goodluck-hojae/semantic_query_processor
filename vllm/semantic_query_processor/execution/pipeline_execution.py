@@ -528,7 +528,7 @@ class BlockingExecutor:
     async def execute_tasks(
         seeds,
         task_builder,
-        concurrency: int = 100,
+        concurrency: int = 64,
     ):
         manager = KVMemoryManager.get_instance()
 
