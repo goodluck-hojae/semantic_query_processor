@@ -219,7 +219,7 @@ class AsyncPipelineExecutor:
 
             # Grow any stage with a saturated queue. Prefer borrowing from the
             # immediate upstream stage first because that matches pipeline flow.
-            for idx, stage in enumerate(stages):
+            for idx, stage in enumerate(stages[1:]):
                 if not stage.is_saturated():
                     continue
 
@@ -234,30 +234,30 @@ class AsyncPipelineExecutor:
             for idx in range(1, len(stages)):
                 stage = stages[idx]
                 prev_stage = stages[idx - 1]
-                downstream_light = (
-                    stage.running_count() <= 1
-                    and stage.ready_count() <= stage.low_threshold
-                )
-                if not (stage.is_starving() and downstream_light):
+                # downstream_light = (
+                #     stage.running_count() <= 1
+                #     and stage.ready_count() <= stage.low_threshold
+                # )
+                # if not (stage.is_starving() and downstream_light):
+                #     continue
+    
+                if not (stage.is_starving()):
                     continue
-
                 head_task = prev_stage.peek_task()
                 if head_task is None:
                     continue
 
-                head_budget = prev_stage.estimate_budget(head_task)
-                used, cap = self.manager.stage_usage(prev_stage.stage_id)
-                needed = used + head_budget - cap
-                if needed <= 0:
-                    continue
+                # head_budget = prev_stage.estimate_budget(head_task)
+                # used, cap = self.manager.stage_usage(prev_stage.stage_id)
+                # needed = used + head_budget - cap
+                # if needed <= 0:
+                #     continue
 
-                while needed > 0 and await self.manager.rebalance_stage_capacity(
+                if await self.manager.rebalance_stage_capacity(
                     receiver_id=prev_stage.stage_id,
                     donor_hint=stage.stage_id,
                 ):
                     changed = True
-                    used, cap = self.manager.stage_usage(prev_stage.stage_id)
-                    needed = used + head_budget - cap
 
             if changed:
                 log_running_tasks("rebalance")

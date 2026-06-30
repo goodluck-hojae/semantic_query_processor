@@ -36,7 +36,7 @@ class VLLMExecutor(LLMExecutor):
             frequency_penalty=0.5,
             repetition_penalty=1.3,
             priority=priority,
-            vllm_xargs={"pinned": pin},
+            vllm_xargs={"pinned": False},
         )
 
 
@@ -51,7 +51,7 @@ class VLLMExecutor(LLMExecutor):
             frequency_penalty=0.5,
             repetition_penalty=1.3,
             priority=priority,
-            vllm_xargs={"pinned": pin},
+            vllm_xargs={"pinned": False},
         )
 
     async def execute(
