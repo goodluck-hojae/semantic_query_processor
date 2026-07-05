@@ -109,7 +109,7 @@ VLLM_ENABLE_V1_MULTIPROCESSING=0 vllm serve \
   --port 8004
 ```
 
-## Pipeline Examples
+## Benchmark
 
 The example clients live in the benchmark directory:
 
