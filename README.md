@@ -93,9 +93,9 @@ python vllm/kalypso/icp/vector_service.py \
 ### Cascade Model
 
 Cascade/proxy filtering should use a separate vLLM endpoint. For example, run a
-Llama 8B server on port `8004` and configure benchmark clients with
-`cascade_api_base="http://localhost:8004/v1"`. For the 70B setup above, pass
-`cascade_model` explicitly if you use cascade operators.
+Llama 8B server and configure benchmark clients with a separate
+`cascade_api_base`. For the 70B setup above, pass `cascade_model` explicitly if
+you use cascade operators.
 
 ```bash
 cd <repo-root>
@@ -118,7 +118,7 @@ cd <repo-root>/vllm/kalypso/benchmark
 ```
 
 Each client sends a request to the semantic query endpoint. By default, the
-clients use `meta-llama/Llama-3.3-70B-Instruct` and port `8003`.
+clients use `meta-llama/Llama-3.3-70B-Instruct`.
 
 Small benchmark datasets are bundled under:
 
