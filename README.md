@@ -60,14 +60,12 @@ Equivalent JSON-style args:
 }
 ```
 
-
-For the 70B setup above, pass `cascade_model` explicitly if you use cascade
-operators.
-
-## Run ICP Service
+## Run ICP and Cascade Services
 
 Some benchmark pipelines use ICP/indexed retrieval. Start the ICP service before
 running those clients.
+
+### ICP Service
 
 For BioDEX, use the default FAISS backend:
 
@@ -92,11 +90,12 @@ python vllm/kalypso/icp/vector_service.py \
   --backend colbert
 ```
 
-## Run Cascade Model
+### Cascade Model
 
 Cascade/proxy filtering should use a separate vLLM endpoint. For example, run a
 Llama 8B server on port `8004` and configure benchmark clients with
-`cascade_api_base="http://localhost:8004/v1"`:
+`cascade_api_base="http://localhost:8004/v1"`. For the 70B setup above, pass
+`cascade_model` explicitly if you use cascade operators.
 
 ```bash
 cd <repo-root>
