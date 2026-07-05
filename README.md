@@ -136,6 +136,10 @@ Included sample data contains 10 records per dataset:
 - `reactions/`
 - `contract-nli/`
 
+Full benchmark datasets are available as zip files on Google Drive:
+
+`https://drive.google.com/drive/u/0/folders/1N2UvdBGyHPgq5FjdA_FDtCegItCdC8pd`
+
 Run the FEVER Factool map, indexed search, and filter pipeline:
 
 ```bash
