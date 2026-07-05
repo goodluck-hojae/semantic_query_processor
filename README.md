@@ -1,7 +1,7 @@
-# Semantic Query Processor
+# Kalypso: Relational LLM Serving
 
 This repository is built on top of vLLM `v0.13.0rc4` with an added semantic
-query processor under `vllm/semantic_query_processor`.
+query processor under `semantic_query_processor/vllm/semantic_query_processor`.
 
 The semantic query processor runs inside the vLLM OpenAI-compatible server and
 adds semantic operators such as filtering, mapping, joins, aggregation, top-k
