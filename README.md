@@ -21,9 +21,6 @@ pip install -r requirements/common.txt
 pip install -e . --no-build-isolation
 ```
 
-If you use a virtual environment or conda environment, activate it before
-running the commands above.
-
 ## Run vLLM
 
 Start the vLLM OpenAI-compatible API server with Llama 3.3 70B:
