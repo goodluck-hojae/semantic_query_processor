@@ -166,3 +166,11 @@ Run the Contract NLI filter, join, and map pipeline:
 ```bash
 python client_contract_nli_filter_join_map.py
 ```
+
+## Contact Us
+
+- Hojae Son <hojaeson@umass.edu>
+- Md Ashraful Islam <mdashrafulis@umass.edu>
+- Huy Gia Cao <hcao@umass.edu>
+- Hui Guan <huiguan@cs.umass.edu>
+- Marco Serafini <marco@cs.umass.edu>
