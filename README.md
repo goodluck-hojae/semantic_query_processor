@@ -1,7 +1,7 @@
 # Kalypso: Relational LLM Serving
 
 This repository is built on top of vLLM `v0.13.0rc4` with an added semantic
-query processor under `semantic_query_processor/vllm/kalypso`.
+query processor under `vllm/kalypso`.
 
 The semantic query processor runs inside the vLLM OpenAI-compatible server and
 adds semantic operators such as filtering, mapping, joins, aggregation, top-k
@@ -12,7 +12,7 @@ ranking, and indexed search over local data files.
 Clone the repository and install it from source:
 
 ```bash
-cd /home/hojaeson_umass/semantic_query_processor
+cd <repo-root>
 
 pip install -U pip setuptools wheel ninja cmake packaging
 pip install -r requirements/build.txt
@@ -26,7 +26,7 @@ pip install -e . --no-build-isolation
 Start the vLLM OpenAI-compatible API server with Llama 3.3 70B:
 
 ```bash
-cd /home/hojaeson_umass/semantic_query_processor
+cd <repo-root>
 
 VLLM_ENABLE_V1_MULTIPROCESSING=0 vllm serve \
   --model meta-llama/Llama-3.3-70B-Instruct \
@@ -72,7 +72,7 @@ running those clients.
 For BioDEX, use the default FAISS backend:
 
 ```bash
-cd /home/hojaeson_umass/semantic_query_processor
+cd <repo-root>
 
 python vllm/kalypso/icp/vector_service.py \
   --host 127.0.0.1 \
@@ -84,7 +84,7 @@ ColBERT index over the Wikipedia data. Then start the ICP service with the
 ColBERT backend:
 
 ```bash
-cd /home/hojaeson_umass/semantic_query_processor
+cd <repo-root>
 
 python vllm/kalypso/icp/vector_service.py \
   --host 127.0.0.1 \
@@ -99,7 +99,7 @@ Llama 8B server on port `8004` and configure benchmark clients with
 `cascade_api_base="http://localhost:8004/v1"`:
 
 ```bash
-cd /home/hojaeson_umass/semantic_query_processor
+cd <repo-root>
 
 VLLM_ENABLE_V1_MULTIPROCESSING=0 vllm serve \
   --model meta-llama/Llama-3.1-8B-Instruct \
@@ -115,7 +115,7 @@ VLLM_ENABLE_V1_MULTIPROCESSING=0 vllm serve \
 The example clients live in the benchmark directory:
 
 ```bash
-cd /home/hojaeson_umass/semantic_query_processor/vllm/kalypso/benchmark
+cd <repo-root>/vllm/kalypso/benchmark
 ```
 
 Each client sends a request to the semantic query endpoint. By default, the
@@ -124,7 +124,7 @@ clients use `meta-llama/Llama-3.3-70B-Instruct` and port `8003`.
 Small benchmark datasets are bundled under:
 
 ```bash
-/home/hojaeson_umass/semantic_query_processor/vllm/kalypso/benchmark/sample_data
+vllm/kalypso/benchmark/sample_data
 ```
 
 Included sample data contains 10 records per dataset:
