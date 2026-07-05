@@ -514,60 +514,6 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
 
-# from pydantic import BaseModel
-# from typing import Any, Dict, Optional
-
-
-# class SemanticExecuteRequest(BaseModel):
-#     query: str
-#     metadata: Dict[str, Any]
-
-#     # Optional execution controls (future use)
-#     priority: int = 0
-#     stream: bool = False
-    
-# def build_completion_request(prompt, max_tokens):
-#     return CompletionRequest(
-#         model="meta-llama/Llama-3.2-3B-Instruct",
-#         prompt=prompt,
-#         max_tokens=max_tokens,
-#         temperature=0.0,
-#         stream=False,
-#     )
-
-# async def completion_call_internal(raw_request: Request, prompt, max_tokens):
-#     req = build_completion_request(prompt, max_tokens)
-
-#     response = await create_completion(
-#         request=req,
-#         raw_request=raw_request,
-#     )
-
-#     return response
-
-# async def sem_filter_internal(raw_request: Request, text, predicate):
-#     prompt = f"{predicate}\n{text}\nAnswer yes or no."
-
-#     resp = await completion_call_internal(
-#         raw_request,
-#         prompt,
-#         max_tokens=2,
-#     )
-
-#     raw = resp.body.decode("utf-8")
-#     data = json.loads(raw)
-
-#     if "choices" not in data:
-#         raise RuntimeError(f"Completion failed: {data}")
-#     answer = data["choices"][0]["text"].strip().lower()
-#     request_id = data["id"]
-
-#     return answer.startswith("yes"), request_id+"hi"
-
-
-
-
-
 class UnpinPinnedRequestsRequest(pydantic.BaseModel):
     request_ids: list[str] | None = None
 
