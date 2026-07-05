@@ -79,7 +79,9 @@ python vllm/kalypso/icp/vector_service.py \
   --port 8080
 ```
 
-For FEVER, use the ColBERT backend:
+For FEVER, use the ColBERT backend. Before starting the service, build a
+ColBERT index over the Wikipedia data. Then start the ICP service with the
+ColBERT backend:
 
 ```bash
 cd /home/hojaeson_umass/semantic_query_processor
@@ -133,9 +135,8 @@ Included sample data contains 10 records per dataset:
 - `reactions/`
 - `contract-nli/`
 
-Full benchmark datasets are available as zip files on Google Drive:
-
-`https://drive.google.com/drive/u/0/folders/1N2UvdBGyHPgq5FjdA_FDtCegItCdC8pd`
+Full benchmark datasets are available as zip files on
+[Google Drive](https://drive.google.com/drive/u/0/folders/1N2UvdBGyHPgq5FjdA_FDtCegItCdC8pd).
 
 Run the FEVER Factool map, indexed search, and filter pipeline:
 
