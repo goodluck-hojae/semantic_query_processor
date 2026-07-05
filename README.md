@@ -3,9 +3,9 @@
 This repository is built on top of vLLM `v0.13.0rc4` with an added semantic
 query processor under `vllm/kalypso`.
 
-The semantic query processor runs inside the vLLM OpenAI-compatible server and
-adds semantic operators such as filtering, mapping, joins, aggregation, top-k
-ranking, and indexed search over local data files.
+Kalypso is a relational LLM serving system that executes semantic query plans
+as memory-aware pipelines, reusing KV-cache state across operators to reduce
+recomputation and improve query completion time.
 
 ## Install
 
