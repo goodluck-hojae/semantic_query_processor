@@ -1,11 +1,11 @@
 import random
 
-from vllm.semantic_query_processor.sem_ops import OpKind, OpName, ops
-from vllm.semantic_query_processor.query import Query
-from vllm.semantic_query_processor.data import data
-from vllm.semantic_query_processor.budget import KVMemoryManager
-from vllm.semantic_query_processor.execution.pipeline_execution import PlanExecutor
-from vllm.semantic_query_processor.controller.map_estimator import MapRatioEstimator
+from vllm.kalypso.sem_ops import OpKind, OpName, ops
+from vllm.kalypso.query import Query
+from vllm.kalypso.data import data
+from vllm.kalypso.budget import KVMemoryManager
+from vllm.kalypso.execution.pipeline_execution import PlanExecutor
+from vllm.kalypso.controller.map_estimator import MapRatioEstimator
 from .stage import Stage, Task, stage_builder
 
 class SemanticPlan:

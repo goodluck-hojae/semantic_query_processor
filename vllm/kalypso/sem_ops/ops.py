@@ -2,15 +2,15 @@ import asyncio
 import math
 import os
 from .base import BaseOp, OpKind, OpName
-from vllm.semantic_query_processor.context import (
+from vllm.kalypso.context import (
     RETRY_TASK,
     ExecutionState,
     SemContext,
     SemanticInput,
 )
-from vllm.semantic_query_processor.budget import KVMemoryManager
-from vllm.semantic_query_processor.execution.pipeline_execution import BlockingExecutor
-from vllm.semantic_query_processor.controller.map_estimator import MapRatioEstimator
+from vllm.kalypso.budget import KVMemoryManager
+from vllm.kalypso.execution.pipeline_execution import BlockingExecutor
+from vllm.kalypso.controller.map_estimator import MapRatioEstimator
 from .prompt_utils import get_prompt, get_system_prompt, add_assistant_prompt, get_data_prompt
 import requests
 from typing import Any, List

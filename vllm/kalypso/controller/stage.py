@@ -3,9 +3,9 @@ import math
 from itertools import count
 from typing import Any
 
-from vllm.semantic_query_processor.budget import KVMemoryManager
-from vllm.semantic_query_processor.context import RETRY_TASK, RetryTaskResult
-from vllm.semantic_query_processor.sem_ops import OpKind, ops
+from vllm.kalypso.budget import KVMemoryManager
+from vllm.kalypso.context import RETRY_TASK, RetryTaskResult
+from vllm.kalypso.sem_ops import OpKind, ops
 
 
 _TASK_IDS = count()

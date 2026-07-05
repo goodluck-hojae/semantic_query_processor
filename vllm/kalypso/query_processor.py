@@ -2,11 +2,11 @@ from pathlib import Path
 import asyncio
 from time import monotonic
 
-from vllm.semantic_query_processor.budget import KVMemoryManager
-from vllm.semantic_query_processor.query import Query
-from vllm.semantic_query_processor.controller import SemanticPlan
-from vllm.semantic_query_processor.execution.vllm_executor import VLLMExecutor
-from vllm.semantic_query_processor.pin_registry import PinnedRequestRegistry
+from vllm.kalypso.budget import KVMemoryManager
+from vllm.kalypso.query import Query
+from vllm.kalypso.controller import SemanticPlan
+from vllm.kalypso.execution.vllm_executor import VLLMExecutor
+from vllm.kalypso.pin_registry import PinnedRequestRegistry
 
 
 class QueryProcessor:

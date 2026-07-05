@@ -356,12 +356,12 @@ async def lifespan(app: FastAPI):
 def create_app(
     model_name: str = "intfloat/e5-base-v2",
     backend: str = "faiss",
-    colbert_wiki_path: str = "/home/hojaeson_umass/projects/semops-experiments/pipelines/lotus",
+    colbert_wiki_path: str = "",
     colbert_index_name: str = "fever_factool_wikipedia_colbert",
-    colbert_experiment_root: str = "/home/hojaeson_umass/projects/semops-experiments/pipelines/lotus/logs/colbert_indexes",
+    colbert_experiment_root: str = "logs/colbert_indexes",
     colbert_experiment: str = "wikipedia",
-    colbert_collection: str = "/home/hojaeson_umass/projects/semops-experiments/pipelines/lotus/logs/colbert_indexes/collections/wikipedia.tsv",
-    colbert_root: str = "/home/hojaeson_umass/projects/semops-experiments/projects/ColBERT",
+    colbert_collection: str = "logs/colbert_indexes/collections/wikipedia.tsv",
+    colbert_root: str = "",
 ) -> FastAPI:
     app = FastAPI(lifespan=lifespan)
     app.state.model_name = model_name
@@ -432,21 +432,24 @@ def main():
     parser.add_argument("--backend", choices=("faiss", "colbert"), default="faiss")
     parser.add_argument(
         "--colbert-wiki-path",
-        default="/home/hojaeson_umass/projects/semops-experiments/pipelines/lotus",
+        default=os.environ.get("COLBERT_WIKI_PATH", ""),
     )
     parser.add_argument("--colbert-index-name", default="fever_factool_wikipedia_colbert")
     parser.add_argument(
         "--colbert-experiment-root",
-        default="/home/hojaeson_umass/projects/semops-experiments/pipelines/lotus/logs/colbert_indexes",
+        default=os.environ.get("COLBERT_EXPERIMENT_ROOT", "logs/colbert_indexes"),
     )
     parser.add_argument("--colbert-experiment", default="wikipedia")
     parser.add_argument(
         "--colbert-collection",
-        default="/home/hojaeson_umass/projects/semops-experiments/pipelines/lotus/logs/colbert_indexes/collections/wikipedia.tsv",
+        default=os.environ.get(
+            "COLBERT_COLLECTION",
+            "logs/colbert_indexes/collections/wikipedia.tsv",
+        ),
     )
     parser.add_argument(
         "--colbert-root",
-        default="/home/hojaeson_umass/projects/semops-experiments/projects/ColBERT",
+        default=os.environ.get("COLBERT_ROOT", ""),
     )
     args = parser.parse_args()
 

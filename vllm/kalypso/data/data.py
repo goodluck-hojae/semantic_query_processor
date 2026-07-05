@@ -1,9 +1,9 @@
 import os
 import csv 
 from pathlib import Path 
-from vllm.semantic_query_processor.context import SemContext, SemanticInput, ExecutionState
-from vllm.semantic_query_processor.budget import KVMemoryManager
-from vllm.semantic_query_processor.sem_ops.prompt_utils import get_data_prompt
+from vllm.kalypso.context import SemContext, SemanticInput, ExecutionState
+from vllm.kalypso.budget import KVMemoryManager
+from vllm.kalypso.sem_ops.prompt_utils import get_data_prompt
 
 
 def _data_source(raw_request, data_path, executor):

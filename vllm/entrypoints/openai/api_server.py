@@ -615,8 +615,8 @@ async def unpin_pinned_requests(
     }
 
 
-from vllm.semantic_query_processor import query_processor, query, interface
-from vllm.semantic_query_processor.pin_registry import PinnedRequestRegistry
+from vllm.kalypso import query_processor, query, interface
+from vllm.kalypso.pin_registry import PinnedRequestRegistry
 @router.post("/v1/semantic/query")
 async def semantic_query(
     sem_request: interface.SemanticQueryRequest,

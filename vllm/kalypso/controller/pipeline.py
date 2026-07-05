@@ -1,5 +1,5 @@
-from vllm.semantic_query_processor.sem_ops import ops
-from vllm.semantic_query_processor.budget import KVMemoryManager
+from vllm.kalypso.sem_ops import ops
+from vllm.kalypso.budget import KVMemoryManager
 
 def pipeline_builder(ops, stage_id):
     def _pipeline(ctx):

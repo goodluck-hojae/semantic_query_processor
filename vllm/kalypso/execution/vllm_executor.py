@@ -3,7 +3,7 @@ import json
 from fastapi import Request
 from vllm.entrypoints.openai.protocol import CompletionRequest, ChatCompletionRequest
 from vllm.entrypoints.openai.api_server import create_completion, create_chat_completion
-from vllm.semantic_query_processor.pin_registry import PinnedRequestRegistry
+from vllm.kalypso.pin_registry import PinnedRequestRegistry
 
 from .executor import LLMExecutor, CompletionResult
 

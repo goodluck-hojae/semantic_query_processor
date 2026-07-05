@@ -2,11 +2,11 @@ import asyncio
 # import math
 import time
 
-from vllm.semantic_query_processor.budget import KVMemoryManager
-from vllm.semantic_query_processor.context import RetryTaskResult
-# from vllm.semantic_query_processor.controller.map_estimator import MapRatioEstimator
-from vllm.semantic_query_processor.controller.stage import Task
-from vllm.semantic_query_processor.sem_ops import OpKind, ops
+from vllm.kalypso.budget import KVMemoryManager
+from vllm.kalypso.context import RetryTaskResult
+# from vllm.kalypso.controller.map_estimator import MapRatioEstimator
+from vllm.kalypso.controller.stage import Task
+from vllm.kalypso.sem_ops import OpKind, ops
 
 
 class PlanExecutor:

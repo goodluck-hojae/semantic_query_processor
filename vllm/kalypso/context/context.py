@@ -1,8 +1,8 @@
 
 from typing import Any, Dict, List
 from dataclasses import dataclass, field, replace
-from vllm.semantic_query_processor.execution.vllm_executor import LLMExecutor
-from vllm.semantic_query_processor.sem_ops.prompt_utils import get_data_prompt
+from vllm.kalypso.execution.vllm_executor import LLMExecutor
+from vllm.kalypso.sem_ops.prompt_utils import get_data_prompt
 
  
 class SemanticInput:
