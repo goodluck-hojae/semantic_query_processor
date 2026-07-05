@@ -135,6 +135,41 @@ class SemFilter(BaseOp):
 
 class ICPFilter(BaseOp):
     LOG = False
+    STATS = {
+        "called": 0,
+        "fallback": 0,
+        "accepted": 0,
+        "rejected": 0,
+        "helper_positive": 0,
+        "helper_negative": 0,
+        "fallback_accepted": 0,
+        "fallback_rejected": 0,
+    }
+
+    @classmethod
+    def reset_stats(cls):
+        for key in cls.STATS:
+            cls.STATS[key] = 0
+
+    @classmethod
+    def get_stats(cls):
+        return dict(cls.STATS)
+
+    @classmethod
+    def _record(cls, resolved_by, passed):
+        cls.STATS["called"] += 1
+        cls.STATS["accepted" if passed else "rejected"] += 1
+
+        if resolved_by == "icp_helper_positive":
+            cls.STATS["helper_positive"] += 1
+        elif resolved_by == "icp_helper_negative":
+            cls.STATS["helper_negative"] += 1
+        elif resolved_by == "icp_oracle_fallback":
+            cls.STATS["fallback"] += 1
+            cls.STATS["fallback_accepted" if passed else "fallback_rejected"] += 1
+
+        if cls.LOG:
+            print(f"[sem-op] ICPFilter stats={cls.STATS}")
 
     def __init__(
         self,
@@ -173,6 +208,7 @@ class ICPFilter(BaseOp):
             raise ValueError("ICPFilter expected helper_score on context state.")
 
         if score >= self.high_threshold:
+            self._record("icp_helper_positive", True)
             ctx.output.append({
                 str(self.__class__): {
                     "resolved_by": "icp_helper_positive",
@@ -182,6 +218,7 @@ class ICPFilter(BaseOp):
             return True
 
         if score <= self.low_threshold:
+            self._record("icp_helper_negative", False)
             ctx.output.append({
                 str(self.__class__): {
                     "resolved_by": "icp_helper_negative",
@@ -191,6 +228,7 @@ class ICPFilter(BaseOp):
             return False
 
         passed = await self.oracle_filter(ctx, priority=priority)
+        self._record("icp_oracle_fallback", passed)
         ctx.output.append({
             str(self.__class__): {
                 "resolved_by": "icp_oracle_fallback",
@@ -630,6 +668,37 @@ class CascadeOperator(BaseOp):
     FALSE = 'false'
     LOG = True
     delegate_to_main_count = 0
+    STATS = {
+        "called": 0,
+        "fallback": 0,
+        "accepted": 0,
+        "rejected": 0,
+        "helper_accepted": 0,
+        "helper_rejected": 0,
+        "fallback_accepted": 0,
+        "fallback_rejected": 0,
+    }
+
+    @classmethod
+    def reset_stats(cls):
+        cls.delegate_to_main_count = 0
+        for key in cls.STATS:
+            cls.STATS[key] = 0
+
+    @classmethod
+    def get_stats(cls):
+        return dict(cls.STATS)
+
+    @classmethod
+    def _record(cls, resolved_by, passed):
+        cls.STATS["called"] += 1
+        cls.STATS["accepted" if passed else "rejected"] += 1
+
+        if resolved_by == "main":
+            cls.STATS["fallback"] += 1
+            cls.STATS["fallback_accepted" if passed else "fallback_rejected"] += 1
+        else:
+            cls.STATS["helper_accepted" if passed else "helper_rejected"] += 1
 
     def __init__(
         self,
@@ -829,10 +898,10 @@ class CascadeOperator(BaseOp):
         else:
             resolved = self._resolve_with_thresholds(helper_probs)
             print(resolved)
-            if resolved[0] is None:
+            if resolved is None or resolved[0] is None:
                 verdict, resolved_by = await self._fallback_to_main_executor(ctx, prompt, priority)
                 passed = self.FALSE not in verdict
-                passed, positive_prob = resolved
+                positive_prob = resolved[1] if resolved is not None else None
             else:
                 passed, positive_prob = resolved
                 resolved_by = "helper"
@@ -852,6 +921,7 @@ class CascadeOperator(BaseOp):
 
         if self.negate:
             passed = not passed
+        type(self)._record(resolved_by, passed)
 
         ctx.output.append({
             str(self.__class__): verdict,

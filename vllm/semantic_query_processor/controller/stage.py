@@ -93,7 +93,7 @@ class Stage:
 
         _, cur_cap = manager.stage_usage(self.stage_id)
         self.high_threshold = max(1, int(1 * cur_cap // min_budget))
-        self.low_threshold = max(1, int(0.5 * cur_cap // min_budget))
+        self.low_threshold = max(1, int(0.2 * cur_cap // min_budget))
         # print(f'{self.stage_id}-{self.low_threshold}, self.is_starving(): {self.is_starving()}, self.is_saturated(): {self.is_saturated()}')
 
     def peek_task(self) -> Task | None:

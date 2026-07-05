@@ -14,7 +14,6 @@ class SemanticPlan:
     def __init__(self, executor):
         self.executor = executor
         self.plan_executor = PlanExecutor()
-        
 
 
     def build(self, ctxs, operators):
@@ -109,15 +108,15 @@ class SemanticPlan:
             # Start early stages at their minimum admission budget and give the
             # last stage the remaining capacity, since it is usually the
             # bottleneck after fanout.
-            elif num_stages == 2:
-                fixed_fractions = (0.9, 0.1)
-                for sid, fraction in zip(stage_ids, fixed_fractions):
-                    kv.register_stage(
-                        sid,
-                        fraction,
-                        min_fraction=fraction,
-                        max_fraction=fraction,
-                    )
+            # elif num_stages == 2:
+            #     fixed_fractions = (0.9, 0.1)
+            #     for sid, fraction in zip(stage_ids, fixed_fractions):
+            #         kv.register_stage(
+            #             sid,
+            #             fraction,
+            #             min_fraction=fraction,
+            #             max_fraction=fraction,
+            #         )
             elif num_stages > 1:
                 total_capacity = kv.capacity()
                 assigned_caps = {
@@ -495,7 +494,15 @@ class SemanticPlan:
         plan = self.build(ctxs, physical_ops)
         self.print_plan(plan)
 
+        ops.ICPFilter.reset_stats()
+        ops.CascadeOperator.reset_stats()
         out, _ = await self.plan_executor.execute(ctxs, plan)
         MapRatioEstimator.instance().reset()
+        icp_stats = ops.ICPFilter.get_stats()
+        if icp_stats["called"] > 0:
+            print(f"[query] ICPFilter stats={icp_stats}")
+        cascade_stats = ops.CascadeOperator.get_stats()
+        if cascade_stats["called"] > 0:
+            print(f"[query] CascadeOperator stats={cascade_stats}")
         print(f'len(out){len(out)}')
         return out 
