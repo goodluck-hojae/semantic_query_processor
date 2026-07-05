@@ -1,7 +1,7 @@
 # Semantic Query Processor
 
-This repository is a modified vLLM source tree with an added semantic query
-processor under `vllm/semantic_query_processor`.
+This repository is built on top of vLLM `v0.13.0rc4` with an added semantic
+query processor under `vllm/semantic_query_processor`.
 
 The semantic query processor runs inside the vLLM OpenAI-compatible server and
 adds semantic operators such as filtering, mapping, joins, aggregation, top-k
@@ -34,7 +34,7 @@ cd /home/hojaeson_umass/semantic_query_processor
 VLLM_ENABLE_V1_MULTIPROCESSING=0 vllm serve \
   --model meta-llama/Llama-3.3-70B-Instruct \
   --tensor-parallel-size 4 \
-  --gpu-memory-utilization 0.8 \
+  --gpu-memory-utilization 0.9 \
   --enable-prefix-caching \
   --max-model-len 32768 \
   --port 8003
@@ -66,6 +66,50 @@ Equivalent JSON-style args:
 
 For the 70B setup above, pass `cascade_model` explicitly if you use cascade
 operators.
+
+## Run ICP Service
+
+Some benchmark pipelines use ICP/indexed retrieval. Start the ICP service before
+running those clients.
+
+For BioDEX, use the default FAISS backend:
+
+```bash
+cd /home/hojaeson_umass/semantic_query_processor
+
+python vllm/semantic_query_processor/icp/vector_service.py \
+  --host 127.0.0.1 \
+  --port 8080
+```
+
+For FEVER, use the ColBERT backend:
+
+```bash
+cd /home/hojaeson_umass/semantic_query_processor
+
+python vllm/semantic_query_processor/icp/vector_service.py \
+  --host 127.0.0.1 \
+  --port 8080 \
+  --backend colbert
+```
+
+## Run Cascade Model
+
+Cascade/proxy filtering should use a separate vLLM endpoint. For example, run a
+Llama 8B server on port `8004` and configure benchmark clients with
+`cascade_api_base="http://localhost:8004/v1"`:
+
+```bash
+cd /home/hojaeson_umass/semantic_query_processor
+
+VLLM_ENABLE_V1_MULTIPROCESSING=0 vllm serve \
+  --model meta-llama/Llama-3.1-8B-Instruct \
+  --tensor-parallel-size 1 \
+  --gpu-memory-utilization 0.9 \
+  --enable-prefix-caching \
+  --max-model-len 32768 \
+  --port 8004
+```
 
 ## Pipeline Examples
 
@@ -121,25 +165,3 @@ Run the Contract NLI filter, join, and map pipeline:
 ```bash
 python client_contract_nli_filter_join_map.py
 ```
-
-To override the endpoint or model name:
-
-```bash
-python client_medec_filter_map_map.py \
-  --model-name meta-llama/Llama-3.3-70B-Instruct \
-  --port 8003
-```
-
-or:
-
-```bash
-python client_medec_filter_map_map.py \
-  --endpoint http://localhost:8003/v1/semantic/query
-```
-
-## Useful Semantic Endpoints
-
-- `POST /v1/semantic/query`: execute a semantic query.
-- `GET /v1/semantic/pinned`: inspect currently pinned requests.
-- `POST /v1/semantic/pinned/unpin`: unpin pinned requests.
-- `GET /v1/semantic/scheduler_state`: inspect vLLM scheduler state.
