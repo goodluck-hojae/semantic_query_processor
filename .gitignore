@@ -215,11 +215,11 @@ hip_compat.h
 # Benchmark dataset
 benchmarks/**/*.json
 
-# Semantic query processor benchmark data
-/vllm/semantic_query_processor/benchmark/data/
-!/vllm/semantic_query_processor/benchmark/sample_data/
-!/vllm/semantic_query_processor/benchmark/sample_data/**
-!/vllm/semantic_query_processor/benchmark/sample_data/**/*.csv
+# Kalypso benchmark data
+/vllm/kalypso/benchmark/data/
+!/vllm/kalypso/benchmark/sample_data/
+!/vllm/kalypso/benchmark/sample_data/**
+!/vllm/kalypso/benchmark/sample_data/**/*.csv
 
 # Linting
 actionlint
